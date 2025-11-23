@@ -1,8 +1,10 @@
 use crate::llm::client::{async_trait, LlmClient};
 use crate::llm::prompt;
-use crate::parser::{CommandOption, CommandSpec, DangerLevel, PositionalArg};
+use crate::parser::{CommandOption, CommandSpec, DangerLevel};
 use crate::QuocliError;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 pub struct AnthropicClient {
     api_key: String,
@@ -62,27 +64,6 @@ impl AnthropicClient {
     }
 }
 
-// Intermediate structures for two-pass approach
-#[derive(Deserialize)]
-struct DiscoveryResponse {
-    command: String,
-    description: String,
-    danger_level: DangerLevel,
-    options: Vec<CompactOption>,
-    positional_args: Vec<CompactPositional>,
-    #[serde(default)]
-    subcommands: Vec<String>,
-}
-
-#[derive(Deserialize)]
-struct CompactOption {
-    flags: Vec<String>,
-}
-
-#[derive(Deserialize)]
-struct CompactPositional {
-    name: String,
-}
 
 /// Strip markdown code blocks from LLM response
 fn strip_markdown_code_blocks(text: &str) -> String {
@@ -104,6 +85,48 @@ fn strip_markdown_code_blocks(text: &str) -> String {
     }
 
     text.to_string()
+}
+
+/// Extract flags from help text using regex (local, no LLM needed)
+fn extract_flags_from_help(help_text: &str) -> Vec<Vec<String>> {
+    let mut all_flags: Vec<Vec<String>> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    // Pattern to match flags like: -x, --long-option, -x <arg>, --option=value, etc.
+    // Look for lines that start with whitespace followed by a dash
+    let line_pattern = Regex::new(r"(?m)^\s+(-[a-zA-Z0-9](?:[,\s]+--[a-zA-Z0-9-]+)?|--[a-zA-Z0-9-]+(?:[,\s]+-[a-zA-Z0-9])?)").unwrap();
+
+    // Pattern to extract individual flags from a match
+    let flag_pattern = Regex::new(r"(-[a-zA-Z0-9]|--[a-zA-Z0-9-]+)").unwrap();
+
+    for cap in line_pattern.captures_iter(help_text) {
+        let matched = cap.get(1).unwrap().as_str();
+        let mut flags: Vec<String> = Vec::new();
+
+        for flag_cap in flag_pattern.captures_iter(matched) {
+            let flag = flag_cap.get(1).unwrap().as_str().to_string();
+            if !seen.contains(&flag) {
+                flags.push(flag.clone());
+                seen.insert(flag);
+            }
+        }
+
+        if !flags.is_empty() {
+            all_flags.push(flags);
+        }
+    }
+
+    // Also try to catch standalone long options that might not be indented
+    let standalone_pattern = Regex::new(r"(?m)^(--[a-zA-Z0-9][a-zA-Z0-9-]*)").unwrap();
+    for cap in standalone_pattern.captures_iter(help_text) {
+        let flag = cap.get(1).unwrap().as_str().to_string();
+        if !seen.contains(&flag) {
+            all_flags.push(vec![flag.clone()]);
+            seen.insert(flag);
+        }
+    }
+
+    all_flags
 }
 
 #[derive(Serialize)]
@@ -145,30 +168,53 @@ impl LlmClient for AnthropicClient {
             format!("{} {}", command, subcommands.join(" "))
         };
 
-        // === PASS 1: Discover all options (compact format) ===
-        tracing::info!("Pass 1: Discovering options for {}", full_command);
+        // === PASS 1: Extract flags locally using regex (instant, no token limits) ===
+        tracing::info!("Pass 1: Extracting flags from help text for {}", full_command);
 
-        let discovery_system = prompt::options_discovery_system_prompt();
-        let discovery_user = prompt::options_discovery_user_prompt(&full_command, help_text);
+        let extracted_flags = extract_flags_from_help(help_text);
+        tracing::info!("Extracted {} flag groups from help text", extracted_flags.len());
 
-        let discovery_json = self.call_api(&discovery_system, &discovery_user, 8192).await?;
+        // Get command metadata (description, danger level) with a small LLM call
+        let metadata_system = "You are a CLI analyzer. Return only valid JSON.";
+        let metadata_user = format!(
+            r#"Analyze this command and return JSON with description and danger_level.
 
-        let discovery: DiscoveryResponse = serde_json::from_str(&discovery_json).map_err(|e| {
-            QuocliError::Llm(format!("Failed to parse discovery JSON: {}. Response: {}", e, discovery_json))
-        })?;
+COMMAND: {full_command}
 
-        tracing::info!("Discovered {} options, {} positional args",
-            discovery.options.len(), discovery.positional_args.len());
+HELP TEXT (first 500 chars):
+{}
+
+Return: {{"description": "brief description", "danger_level": "low"}}
+danger_level: low/medium/high/critical based on potential for data loss.
+
+JSON only, no other text."#,
+            help_text.chars().take(500).collect::<String>()
+        );
+
+        let metadata_json = self.call_api(metadata_system, &metadata_user, 256).await?;
+
+        #[derive(Deserialize)]
+        struct Metadata {
+            description: String,
+            danger_level: DangerLevel,
+        }
+
+        let metadata: Metadata = serde_json::from_str(&metadata_json).unwrap_or(Metadata {
+            description: format!("Command: {}", full_command),
+            danger_level: DangerLevel::Low,
+        });
+
+        tracing::info!("Got metadata: {} options to process", extracted_flags.len());
 
         // === PASS 2: Get details for each option ===
         let detail_system = prompt::option_detail_system_prompt();
         let mut detailed_options: Vec<CommandOption> = Vec::new();
 
-        for (i, opt) in discovery.options.iter().enumerate() {
+        for (i, flags) in extracted_flags.iter().enumerate() {
             tracing::info!("Pass 2: Getting details for option {}/{}: {:?}",
-                i + 1, discovery.options.len(), opt.flags);
+                i + 1, extracted_flags.len(), flags);
 
-            let detail_user = prompt::option_detail_user_prompt(&full_command, &opt.flags, help_text);
+            let detail_user = prompt::option_detail_user_prompt(&full_command, flags, help_text);
             let detail_json = self.call_api(&detail_system, &detail_user, 1024).await?;
 
             let detailed: CommandOption = serde_json::from_str(&detail_json).map_err(|e| {
@@ -180,33 +226,15 @@ impl LlmClient for AnthropicClient {
             detailed_options.push(detailed);
         }
 
-        // === Get details for positional arguments ===
-        let mut detailed_positionals: Vec<PositionalArg> = Vec::new();
-
-        for (i, pos) in discovery.positional_args.iter().enumerate() {
-            tracing::info!("Pass 2: Getting details for positional {}/{}: {}",
-                i + 1, discovery.positional_args.len(), pos.name);
-
-            let detail_user = prompt::positional_detail_user_prompt(&full_command, &pos.name, help_text);
-            let detail_json = self.call_api(&detail_system, &detail_user, 512).await?;
-
-            let detailed: PositionalArg = serde_json::from_str(&detail_json).map_err(|e| {
-                tracing::warn!("Failed to parse positional details: {}. Using minimal data.", e);
-                return QuocliError::Llm(format!("Failed to parse positional detail: {}", e));
-            })?;
-
-            detailed_positionals.push(detailed);
-        }
-
         // === Assemble final spec ===
         let spec = CommandSpec {
-            command: discovery.command,
+            command: command.to_string(),
             version_hash: help_hash.to_string(),
-            description: discovery.description,
+            description: metadata.description,
             options: detailed_options,
-            positional_args: detailed_positionals,
-            subcommands: discovery.subcommands,
-            danger_level: discovery.danger_level,
+            positional_args: vec![], // TODO: extract positional args from help text
+            subcommands: vec![],
+            danger_level: metadata.danger_level,
             examples: vec![],
         };
 
