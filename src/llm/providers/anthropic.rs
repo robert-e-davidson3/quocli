@@ -80,7 +80,7 @@ impl LlmClient for AnthropicClient {
 
         let request = AnthropicRequest {
             model: self.model.clone(),
-            max_tokens: 4096,
+            max_tokens: 16384,
             system: system_prompt,
             messages: vec![Message {
                 role: "user".to_string(),
