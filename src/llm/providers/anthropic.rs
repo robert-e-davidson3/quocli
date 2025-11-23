@@ -2,7 +2,8 @@ use crate::llm::client::{async_trait, LlmClient};
 use crate::llm::prompt;
 use crate::parser::{CommandOption, CommandSpec, DangerLevel, HelpDocumentation};
 use crate::QuocliError;
-use futures::future;
+use futures::stream::{FuturesUnordered, StreamExt};
+use futures::future::BoxFuture;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -408,59 +409,68 @@ JSON only, no other text."#,
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
         }
 
-        // Process remaining options with full concurrency (cache is now warm)
-        let remaining_flags: Vec<_> = extracted_flags.iter().skip(1).collect();
-        for chunk in remaining_flags.chunks(MAX_CONCURRENT_REQUESTS) {
-            let futures: Vec<_> = chunk
-                .iter()
-                .map(|flags| {
-                    let flags = (*flags).clone();
-                    let query = prompt::single_option_query(&flags);
-                    let detail_system = detail_system.clone();
-                    let cached_context = cached_context.clone();
+        // Helper to create option extraction future
+        let make_option_future = |flags: Vec<String>, detail_system: String, cached_context: String| -> BoxFuture<'_, Result<CommandOption, QuocliError>> {
+            Box::pin(async move {
+                let query = prompt::single_option_query(&flags);
+                let detail_json = self.call_api_cached(
+                    &detail_system,
+                    &cached_context,
+                    &query,
+                    4096,
+                    Some("claude-haiku-4-5-20251001"),
+                ).await?;
 
-                    async move {
-                        // Use Haiku for faster option extraction
-                        let detail_json = self.call_api_cached(
-                            &detail_system,
-                            &cached_context,
-                            &query,
-                            4096,
-                            Some("claude-haiku-4-5-20251001"),
-                        ).await?;
+                let detailed: CommandOption = serde_json::from_str(&detail_json).map_err(|e| {
+                    tracing::warn!("Failed to parse option details for {:?}: {}", flags, e);
 
-                        let detailed: CommandOption = serde_json::from_str(&detail_json).map_err(|e| {
-                            tracing::warn!("Failed to parse option details for {:?}: {}", flags, e);
-
-                            // Save failed response to debug file
-                            if let Some(proj_dirs) = directories::ProjectDirs::from("", "", "quocli") {
-                                let debug_dir = proj_dirs.data_dir().join("debug");
-                                if std::fs::create_dir_all(&debug_dir).is_ok() {
-                                    let flag_name = flags.first().map(|f| f.trim_start_matches('-')).unwrap_or("unknown");
-                                    let debug_file = debug_dir.join(format!("failed_{}.json", flag_name));
-                                    if let Err(write_err) = std::fs::write(&debug_file, &detail_json) {
-                                        tracing::warn!("Failed to save debug file: {}", write_err);
-                                    } else {
-                                        tracing::info!("Saved failed response to {:?}", debug_file);
-                                        eprintln!("\nDebug: Failed JSON saved to {:?}", debug_file);
-                                    }
-                                }
+                    // Save failed response to debug file
+                    if let Some(proj_dirs) = directories::ProjectDirs::from("", "", "quocli") {
+                        let debug_dir = proj_dirs.data_dir().join("debug");
+                        if std::fs::create_dir_all(&debug_dir).is_ok() {
+                            let flag_name = flags.first().map(|f| f.trim_start_matches('-')).unwrap_or("unknown");
+                            let debug_file = debug_dir.join(format!("failed_{}.json", flag_name));
+                            if let Err(write_err) = std::fs::write(&debug_file, &detail_json) {
+                                tracing::warn!("Failed to save debug file: {}", write_err);
+                            } else {
+                                tracing::info!("Saved failed response to {:?}", debug_file);
+                                eprintln!("\nDebug: Failed JSON saved to {:?}", debug_file);
                             }
-
-                            QuocliError::Llm(format!("Failed to parse option detail: {}", e))
-                        })?;
-
-                        Ok::<CommandOption, QuocliError>(detailed)
+                        }
                     }
-                })
-                .collect();
 
-            let batch_results = future::try_join_all(futures).await?;
-            detailed_options.extend(batch_results);
+                    QuocliError::Llm(format!("Failed to parse option detail: {}", e))
+                })?;
+
+                Ok(detailed)
+            })
+        };
+
+        // Process remaining options with streaming concurrency (start new request as each completes)
+        let remaining_flags: Vec<_> = extracted_flags.iter().skip(1).cloned().collect();
+        let mut flag_iter = remaining_flags.into_iter();
+        let mut in_flight: FuturesUnordered<BoxFuture<'_, Result<CommandOption, QuocliError>>> = FuturesUnordered::new();
+
+        // Start initial batch of concurrent requests
+        for _ in 0..MAX_CONCURRENT_REQUESTS {
+            if let Some(flags) = flag_iter.next() {
+                in_flight.push(make_option_future(flags, detail_system.clone(), cached_context.clone()));
+            }
+        }
+
+        // Process results as they complete, starting new requests immediately
+        while let Some(result) = in_flight.next().await {
+            let detailed = result?;
+            detailed_options.push(detailed);
 
             // Show progress
             eprint!("\rProcessing options: {}/{}    ", detailed_options.len(), total);
             io::stderr().flush().ok();
+
+            // Start next request if there are more flags
+            if let Some(flags) = flag_iter.next() {
+                in_flight.push(make_option_future(flags, detail_system.clone(), cached_context.clone()));
+            }
         }
 
         // Clear the progress line
