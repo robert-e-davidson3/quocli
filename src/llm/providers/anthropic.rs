@@ -1,6 +1,6 @@
 use crate::llm::client::{async_trait, LlmClient};
 use crate::llm::prompt;
-use crate::parser::{CommandOption, CommandSpec, DangerLevel, HelpDocumentation};
+use crate::parser::{ArgumentType, CommandOption, CommandSpec, DangerLevel, HelpDocumentation, PositionalArg};
 use crate::QuocliError;
 use futures::stream::{FuturesUnordered, StreamExt};
 use futures::future::BoxFuture;
@@ -266,6 +266,139 @@ fn extract_flags_from_help(help_text: &str) -> Vec<Vec<String>> {
     all_flags
 }
 
+/// Extract positional arguments from help text using regex (local, no LLM needed)
+fn extract_positional_args_from_help(help_text: &str) -> Vec<PositionalArg> {
+    let mut positional_args: Vec<PositionalArg> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    // Find usage lines - typically contain the command invocation pattern
+    // Look for lines starting with "Usage:", "usage:", or indented command patterns
+    let usage_section_pattern = Regex::new(r"(?mi)^(?:usage:?\s*\n?|^\s{0,4}[a-z][\w-]*\s+\[)").unwrap();
+
+    // Pattern to match required positional args: <arg>, <arg>...
+    let required_pattern = Regex::new(r"<([a-zA-Z][a-zA-Z0-9_-]*)>(?:\.\.\.)?").unwrap();
+
+    // Pattern to match optional positional args: [arg] (but not [--flag] or [-f])
+    let optional_pattern = Regex::new(r"\[([a-zA-Z][a-zA-Z0-9_-]*)\](?:\.\.\.)?").unwrap();
+
+    // Pattern to match UPPERCASE positional args like SOURCE, FILE, DIRECTORY
+    let uppercase_pattern = Regex::new(r"(?<!\w)([A-Z][A-Z0-9_]{1,})(?:\.\.\.|(?!\w))").unwrap();
+
+    // Extract the usage section (first few lines after "Usage:" or the whole text if no usage section)
+    let usage_text = if let Some(m) = usage_section_pattern.find(help_text) {
+        // Get text from usage marker to next blank line or section
+        let start = m.start();
+        let remaining = &help_text[start..];
+        // Take lines until we hit a blank line or a new section (line starting with letter and colon)
+        let mut end_offset = remaining.len();
+        for (i, line) in remaining.lines().enumerate() {
+            if i > 0 && (line.trim().is_empty() || (line.chars().next().map(|c| c.is_ascii_alphabetic()).unwrap_or(false) && line.contains(':'))) {
+                end_offset = remaining.find(line).unwrap_or(end_offset);
+                break;
+            }
+            // Stop after 10 lines to avoid going too far
+            if i > 10 {
+                break;
+            }
+        }
+        &remaining[..end_offset]
+    } else {
+        // No usage section found, use first 500 chars
+        &help_text[..help_text.len().min(500)]
+    };
+
+    // Helper to infer argument type from name
+    let infer_type = |name: &str| -> ArgumentType {
+        let lower = name.to_lowercase();
+        if lower.contains("file") || lower.contains("path") || lower.contains("dir")
+            || lower == "source" || lower == "target" || lower == "dest"
+            || lower == "destination" || lower == "src" || lower == "dst"
+            || lower.contains("mount") {
+            ArgumentType::Path
+        } else if lower.contains("num") || lower.contains("count") || lower == "n" {
+            ArgumentType::Int
+        } else {
+            ArgumentType::String
+        }
+    };
+
+    // Extract required positional args
+    for cap in required_pattern.captures_iter(usage_text) {
+        let name = cap.get(1).unwrap().as_str().to_string();
+        let lower_name = name.to_lowercase();
+
+        // Skip if it looks like a flag value placeholder (common patterns)
+        if lower_name == "value" || lower_name == "arg" || lower_name == "option"
+            || lower_name == "options" || lower_name == "args" {
+            continue;
+        }
+
+        if !seen.contains(&lower_name) {
+            seen.insert(lower_name.clone());
+            positional_args.push(PositionalArg {
+                name: name.clone(),
+                description: String::new(),
+                required: true,
+                sensitive: false,
+                argument_type: infer_type(&name),
+                default: None,
+            });
+        }
+    }
+
+    // Extract optional positional args
+    for cap in optional_pattern.captures_iter(usage_text) {
+        let name = cap.get(1).unwrap().as_str().to_string();
+        let lower_name = name.to_lowercase();
+
+        // Skip if it looks like a flag or common placeholder
+        if lower_name == "options" || lower_name == "option" || lower_name == "args"
+            || lower_name == "flags" || name.starts_with('-') {
+            continue;
+        }
+
+        if !seen.contains(&lower_name) {
+            seen.insert(lower_name.clone());
+            positional_args.push(PositionalArg {
+                name,
+                description: String::new(),
+                required: false,
+                sensitive: false,
+                argument_type: infer_type(&lower_name),
+                default: None,
+            });
+        }
+    }
+
+    // Extract UPPERCASE positional args (only if we haven't found angle-bracket versions)
+    if positional_args.is_empty() {
+        for cap in uppercase_pattern.captures_iter(usage_text) {
+            let name = cap.get(1).unwrap().as_str().to_string();
+            let lower_name = name.to_lowercase();
+
+            // Skip common non-positional uppercase words
+            if lower_name == "usage" || lower_name == "options" || lower_name == "synopsis"
+                || lower_name == "description" || lower_name == "see" || lower_name == "also" {
+                continue;
+            }
+
+            if !seen.contains(&lower_name) {
+                seen.insert(lower_name.clone());
+                positional_args.push(PositionalArg {
+                    name: lower_name.clone(),
+                    description: String::new(),
+                    required: true, // UPPERCASE args are typically required
+                    sensitive: false,
+                    argument_type: infer_type(&lower_name),
+                    default: None,
+                });
+            }
+        }
+    }
+
+    positional_args
+}
+
 #[derive(Serialize)]
 struct AnthropicRequest {
     model: String,
@@ -347,6 +480,9 @@ impl LlmClient for AnthropicClient {
 
         let extracted_flags = extract_flags_from_help(help_text);
         tracing::info!("Extracted {} flag groups from help text", extracted_flags.len());
+
+        let extracted_positional = extract_positional_args_from_help(help_text);
+        tracing::info!("Extracted {} positional args from help text", extracted_positional.len());
 
         // Get command metadata (description, danger level) with a small LLM call
         let metadata_system = "You are a CLI analyzer. Return only valid JSON.";
@@ -497,7 +633,7 @@ JSON only, no other text."#,
             version_hash: help_hash.to_string(),
             description: metadata.description,
             options: detailed_options,
-            positional_args: vec![], // TODO: extract positional args from help text
+            positional_args: extracted_positional,
             subcommands: vec![],
             danger_level: metadata.danger_level,
             examples: vec![],
