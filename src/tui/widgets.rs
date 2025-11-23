@@ -39,7 +39,7 @@ impl FormField {
             field_type: opt.argument_type.clone(),
             required: opt.required,
             sensitive: opt.sensitive,
-            value: opt.default.clone().unwrap_or_default(),
+            value: String::new(),
             enum_values: opt.enum_values.clone(),
             default: opt.default.clone(),
         }
@@ -53,7 +53,7 @@ impl FormField {
             field_type: arg.argument_type.clone(),
             required: arg.required,
             sensitive: arg.sensitive,
-            value: arg.default.clone().unwrap_or_default(),
+            value: String::new(),
             enum_values: vec![],
             default: arg.default.clone(),
         }
@@ -381,6 +381,13 @@ impl FormState {
             .filter(|f| !f.value.is_empty())
             .map(|f| (f.id.clone(), f.value.clone()))
             .collect()
+    }
+
+    /// Clear all field values
+    pub fn clear_all_values(&mut self) {
+        for field in &mut self.fields {
+            field.value = String::new();
+        }
     }
 
     /// Load cached values and track frequent fields

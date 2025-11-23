@@ -145,6 +145,9 @@ fn run_form_loop(
                     KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         return Ok(Some(state.get_values()))
                     }
+                    KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        state.clear_all_values()
+                    }
                     // Search: / for flag-only search, Ctrl+/ for including description
                     KeyCode::Char('/') => {
                         let include_desc = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -292,7 +295,7 @@ fn draw_form(
     } else if state.search_mode {
         "Type to search | Enter: select | Esc: clear"
     } else {
-        "↑/↓: navigate | Enter: edit | /: search | `: tabs | Ctrl+E: execute | q: cancel"
+        "↑/↓: navigate | Enter: edit | /: search | `: tabs | Ctrl+X: clear | Ctrl+E: execute | q: cancel"
     };
     let help = Paragraph::new(help_text).style(theme.help);
     f.render_widget(help, chunks[4]);
