@@ -191,8 +191,9 @@ fn run_form_loop(
                     }
                     // Tab switching
                     KeyCode::Char('`') => state.next_tab(),
-                    KeyCode::Char('1') => state.set_tab(OptionTab::All),
-                    KeyCode::Char('2') => state.set_tab(OptionTab::Frequent),
+                    KeyCode::Char('1') => state.set_tab(OptionTab::Basic),
+                    KeyCode::Char('2') => state.set_tab(OptionTab::Advanced),
+                    KeyCode::Char('3') => state.set_tab(OptionTab::Frequent),
                     KeyCode::Up | KeyCode::Char('k') => state.move_up(),
                     KeyCode::Down | KeyCode::Char('j') => state.move_down(),
                     KeyCode::Enter => {
@@ -285,7 +286,8 @@ fn draw_form(
 
     // Build title showing tab and count
     let tab_name = match state.current_tab {
-        OptionTab::All => "All",
+        OptionTab::Basic => "Basic",
+        OptionTab::Advanced => "Advanced",
         OptionTab::Frequent => "Frequent",
     };
     let title = if state.search_query.is_empty() {
@@ -331,7 +333,7 @@ fn draw_form(
     } else if state.search_mode {
         "Type to search | Enter: select | Esc: clear"
     } else {
-        "↑/↓: navigate | Ctrl+↑/↓: scroll desc | Enter: edit | /: search | `: tabs | Ctrl+E: execute | q: cancel"
+        "↑/↓: navigate | Ctrl+↑/↓: scroll desc | Enter: edit | /: search | 1/2/3: Basic/Adv/Freq | Ctrl+X: clear | Ctrl+E: exec | q: cancel"
     };
     let help = Paragraph::new(help_text).style(theme.help);
     f.render_widget(help, chunks[4]);

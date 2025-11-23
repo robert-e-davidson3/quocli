@@ -37,7 +37,8 @@ Return a JSON object with this structure:
   "conflicts_with": [],
   "requires": [],
   "default": null,
-  "enum_values": []
+  "enum_values": [],
+  "level": "basic"
 }}
 
 Guidelines:
@@ -48,6 +49,7 @@ Guidelines:
 - requires: list of flags that must be used with this one
 - enum_values: if argument_type is "enum", list allowed values
 - default: default value if specified
+- level: "basic" for common/frequently-used options, "advanced" for specialized/rarely-used options
 
 Respond with only JSON, no other text."#,
         flags_str

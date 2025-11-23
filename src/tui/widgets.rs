@@ -1,11 +1,12 @@
-use crate::parser::{ArgumentType, CommandOption, PositionalArg};
+use crate::parser::{ArgumentType, CommandOption, OptionLevel, PositionalArg};
 use crate::shell::get_env_suggestions;
 use std::collections::HashMap;
 
 /// Tab categories for organizing options
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum OptionTab {
-    All,
+    Basic,
+    Advanced,
     Frequent,
 }
 
@@ -21,6 +22,7 @@ pub struct FormField {
     pub value: String,
     pub enum_values: Vec<String>,
     pub default: Option<String>,
+    pub level: OptionLevel,
 }
 
 impl FormField {
@@ -42,6 +44,7 @@ impl FormField {
             value: String::new(),
             enum_values: opt.enum_values.clone(),
             default: opt.default.clone(),
+            level: opt.level.clone(),
         }
     }
 
@@ -56,6 +59,7 @@ impl FormField {
             value: String::new(),
             enum_values: vec![],
             default: arg.default.clone(),
+            level: OptionLevel::Basic, // Positional args are always basic
         }
     }
 
@@ -88,6 +92,8 @@ pub struct FormState {
     pub include_description: bool,
     // Tab state
     pub current_tab: OptionTab,
+    pub basic_indices: Vec<usize>,    // indices of basic-level fields
+    pub advanced_indices: Vec<usize>, // indices of advanced-level fields
     pub frequent_indices: Vec<usize>, // indices of fields that have cached values
     // Env var suggestion state
     pub showing_suggestions: bool,
@@ -99,7 +105,28 @@ pub struct FormState {
 
 impl FormState {
     pub fn new(fields: Vec<FormField>) -> Self {
-        let indices: Vec<usize> = (0..fields.len()).collect();
+        // Compute basic and advanced indices based on level
+        let basic_indices: Vec<usize> = fields
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.level == OptionLevel::Basic)
+            .map(|(i, _)| i)
+            .collect();
+
+        let advanced_indices: Vec<usize> = fields
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.level == OptionLevel::Advanced)
+            .map(|(i, _)| i)
+            .collect();
+
+        // Start with basic indices as filtered (or all if no basic options)
+        let filtered_indices = if basic_indices.is_empty() {
+            (0..fields.len()).collect()
+        } else {
+            basic_indices.clone()
+        };
+
         Self {
             fields,
             selected: 0,
@@ -107,9 +134,11 @@ impl FormState {
             cursor_pos: 0,
             search_mode: false,
             search_query: String::new(),
-            filtered_indices: indices,
+            filtered_indices,
             include_description: false,
-            current_tab: OptionTab::All,
+            current_tab: OptionTab::Basic,
+            basic_indices,
+            advanced_indices,
             frequent_indices: Vec::new(),
             showing_suggestions: false,
             env_suggestions: Vec::new(),
@@ -121,8 +150,9 @@ impl FormState {
     /// Cycle to next tab
     pub fn next_tab(&mut self) {
         self.current_tab = match self.current_tab {
-            OptionTab::All => OptionTab::Frequent,
-            OptionTab::Frequent => OptionTab::All,
+            OptionTab::Basic => OptionTab::Advanced,
+            OptionTab::Advanced => OptionTab::Frequent,
+            OptionTab::Frequent => OptionTab::Basic,
         };
         self.apply_tab_filter();
     }
@@ -136,16 +166,26 @@ impl FormState {
     /// Apply tab-based filtering
     fn apply_tab_filter(&mut self) {
         match self.current_tab {
-            OptionTab::All => {
-                self.filtered_indices = (0..self.fields.len()).collect();
-            }
-            OptionTab::Frequent => {
-                if self.frequent_indices.is_empty() {
-                    // No frequent items, show all
+            OptionTab::Basic => {
+                if self.basic_indices.is_empty() {
+                    // No basic items, show all
                     self.filtered_indices = (0..self.fields.len()).collect();
                 } else {
-                    self.filtered_indices = self.frequent_indices.clone();
+                    self.filtered_indices = self.basic_indices.clone();
                 }
+            }
+            OptionTab::Advanced => {
+                if self.advanced_indices.is_empty() {
+                    // No advanced items, show all
+                    self.filtered_indices = (0..self.fields.len()).collect();
+                } else {
+                    self.filtered_indices = self.advanced_indices.clone();
+                }
+            }
+            OptionTab::Frequent => {
+                // Only show options that have been used (have cached values)
+                // Don't fall back to all - empty is correct when nothing has been used
+                self.filtered_indices = self.frequent_indices.clone();
             }
         }
 
