@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use std::io::{self, Write};
 
 /// Maximum concurrent API requests to avoid rate limiting
-const MAX_CONCURRENT_REQUESTS: usize = 10;
+const MAX_CONCURRENT_REQUESTS: usize = 5;
 
 pub struct AnthropicClient {
     api_key: String,
