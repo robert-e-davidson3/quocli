@@ -282,7 +282,8 @@ fn extract_positional_args_from_help(help_text: &str) -> Vec<PositionalArg> {
     let optional_pattern = Regex::new(r"\[([a-zA-Z][a-zA-Z0-9_-]*)\](?:\.\.\.)?").unwrap();
 
     // Pattern to match UPPERCASE positional args like SOURCE, FILE, DIRECTORY
-    let uppercase_pattern = Regex::new(r"(?<!\w)([A-Z][A-Z0-9_]{1,})(?:\.\.\.|(?!\w))").unwrap();
+    // Use word boundaries instead of look-around (not supported by rust regex)
+    let uppercase_pattern = Regex::new(r"\b([A-Z][A-Z0-9_]{1,})\b(?:\.\.\.)?").unwrap();
 
     // Extract the usage section (first few lines after "Usage:" or the whole text if no usage section)
     let usage_text = if let Some(m) = usage_section_pattern.find(help_text) {
@@ -290,18 +291,20 @@ fn extract_positional_args_from_help(help_text: &str) -> Vec<PositionalArg> {
         let start = m.start();
         let remaining = &help_text[start..];
         // Take lines until we hit a blank line or a new section (line starting with letter and colon)
-        let mut end_offset = remaining.len();
+        let mut end_offset = 0;
         for (i, line) in remaining.lines().enumerate() {
             if i > 0 && (line.trim().is_empty() || (line.chars().next().map(|c| c.is_ascii_alphabetic()).unwrap_or(false) && line.contains(':'))) {
-                end_offset = remaining.find(line).unwrap_or(end_offset);
                 break;
             }
             // Stop after 10 lines to avoid going too far
             if i > 10 {
                 break;
             }
+            // Add this line's length plus newline
+            end_offset += line.len() + 1;
         }
-        &remaining[..end_offset]
+        // Clamp to remaining length in case we counted past the end
+        &remaining[..end_offset.min(remaining.len())]
     } else {
         // No usage section found, use first 500 chars
         &help_text[..help_text.len().min(500)]
@@ -685,5 +688,225 @@ JSON only, no other text."#,
             .ok_or_else(|| QuocliError::Llm("Empty response from API".to_string()))?;
 
         Ok(text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_required_positional_args() {
+        let help_text = r#"
+Usage:
+ mount [options] <source> <directory>
+
+Mount a filesystem.
+"#;
+        let args = extract_positional_args_from_help(help_text);
+
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0].name, "source");
+        assert!(args[0].required);
+        assert_eq!(args[0].argument_type, ArgumentType::Path);
+
+        assert_eq!(args[1].name, "directory");
+        assert!(args[1].required);
+        assert_eq!(args[1].argument_type, ArgumentType::Path);
+    }
+
+    #[test]
+    fn test_extract_optional_positional_args() {
+        let help_text = r#"
+Usage: mycommand [options] [file]
+
+Process a file.
+"#;
+        let args = extract_positional_args_from_help(help_text);
+
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0].name, "file");
+        assert!(!args[0].required);
+        assert_eq!(args[0].argument_type, ArgumentType::Path);
+    }
+
+    #[test]
+    fn test_extract_mixed_positional_args() {
+        let help_text = r#"
+Usage: cp [options] <source> [dest]
+
+Copy files.
+"#;
+        let args = extract_positional_args_from_help(help_text);
+
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0].name, "source");
+        assert!(args[0].required);
+
+        assert_eq!(args[1].name, "dest");
+        assert!(!args[1].required);
+        assert_eq!(args[1].argument_type, ArgumentType::Path);
+    }
+
+    #[test]
+    fn test_extract_uppercase_positional_args() {
+        let help_text = r#"
+Usage: tar [options] FILE...
+
+Archive files.
+"#;
+        let args = extract_positional_args_from_help(help_text);
+
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0].name, "file");
+        assert!(args[0].required);
+        assert_eq!(args[0].argument_type, ArgumentType::Path);
+    }
+
+    #[test]
+    fn test_infer_path_type_from_name() {
+        let help_text = r#"
+Usage: mycommand <file> <path> <directory> <src> <dst> <target>
+"#;
+        let args = extract_positional_args_from_help(help_text);
+
+        for arg in &args {
+            assert_eq!(arg.argument_type, ArgumentType::Path,
+                "Expected {} to be Path type", arg.name);
+        }
+    }
+
+    #[test]
+    fn test_infer_int_type_from_name() {
+        let help_text = r#"
+Usage: mycommand <count> <num>
+"#;
+        let args = extract_positional_args_from_help(help_text);
+
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0].argument_type, ArgumentType::Int);
+        assert_eq!(args[1].argument_type, ArgumentType::Int);
+    }
+
+    #[test]
+    fn test_infer_string_type_default() {
+        let help_text = r#"
+Usage: mycommand <name> <pattern>
+"#;
+        let args = extract_positional_args_from_help(help_text);
+
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0].argument_type, ArgumentType::String);
+        assert_eq!(args[1].argument_type, ArgumentType::String);
+    }
+
+    #[test]
+    fn test_skip_placeholder_args() {
+        let help_text = r#"
+Usage: mycommand <value> <arg> <options> <file>
+"#;
+        let args = extract_positional_args_from_help(help_text);
+
+        // Should only extract <file>, skipping <value>, <arg>, <options>
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0].name, "file");
+    }
+
+    #[test]
+    fn test_no_positional_args() {
+        let help_text = r#"
+Usage: mycommand [options]
+
+Options:
+  -v, --verbose    Be verbose
+  -h, --help       Show help
+"#;
+        let args = extract_positional_args_from_help(help_text);
+
+        assert_eq!(args.len(), 0);
+    }
+
+    #[test]
+    fn test_deduplicates_args() {
+        let help_text = r#"
+Usage:
+ mount [options] <source> <directory>
+ mount [options] <source>
+"#;
+        let args = extract_positional_args_from_help(help_text);
+
+        // Should deduplicate 'source'
+        assert_eq!(args.len(), 2);
+        let names: Vec<_> = args.iter().map(|a| a.name.as_str()).collect();
+        assert!(names.contains(&"source"));
+        assert!(names.contains(&"directory"));
+    }
+
+    #[test]
+    fn test_mount_command_usage() {
+        // Real mount command usage pattern
+        let help_text = r#"
+Usage:
+ mount [-lhV]
+ mount -a [options]
+ mount [options] [--source] <source> | [--target] <directory>
+ mount [options] <source> <directory>
+ mount <operation> <mountpoint> [<target>]
+
+Mount a filesystem.
+
+Options:
+ -a, --all               mount all filesystems
+"#;
+        let args = extract_positional_args_from_help(help_text);
+
+        // Should extract source, directory, operation, mountpoint, target
+        assert!(args.len() >= 2, "Expected at least 2 args, got {}", args.len());
+
+        let names: Vec<_> = args.iter().map(|a| a.name.as_str()).collect();
+        assert!(names.contains(&"source"), "Missing 'source' arg");
+        assert!(names.contains(&"directory"), "Missing 'directory' arg");
+    }
+
+    #[test]
+    fn test_variadic_args() {
+        let help_text = r#"
+Usage: cat [options] <file>...
+"#;
+        let args = extract_positional_args_from_help(help_text);
+
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0].name, "file");
+        assert!(args[0].required);
+    }
+
+    #[test]
+    fn test_usage_section_extraction() {
+        // Test that we stop at the Options section
+        let help_text = r#"
+Usage: mycommand <file>
+
+Options:
+  -v, --verbose    Be verbose
+
+Description:
+  This is a <placeholder> that should not be extracted.
+"#;
+        let args = extract_positional_args_from_help(help_text);
+
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0].name, "file");
+    }
+
+    #[test]
+    fn test_prefers_angle_brackets_over_uppercase() {
+        let help_text = r#"
+Usage: mycommand <file> FILE
+"#;
+        let args = extract_positional_args_from_help(help_text);
+
+        // Should extract <file> but not FILE since we found angle-bracket style
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0].name, "file");
     }
 }
