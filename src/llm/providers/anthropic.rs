@@ -11,9 +11,6 @@ use std::io::{self, Write};
 /// Maximum concurrent API requests to avoid rate limiting
 const MAX_CONCURRENT_REQUESTS: usize = 10;
 
-/// Number of options to request per API call when batching
-const OPTIONS_PER_BATCH: usize = 16;
-
 pub struct AnthropicClient {
     api_key: String,
     model: String,
@@ -371,149 +368,49 @@ JSON only, no other text."#,
         let total = extracted_flags.len();
         let mut detailed_options: Vec<CommandOption> = Vec::with_capacity(total);
 
-        // Use batching with caching if we have more options than the batch size
-        let use_caching = total > OPTIONS_PER_BATCH;
-
         // Show initial progress (after metadata call completes)
-        if use_caching {
-            let num_batches = (total + OPTIONS_PER_BATCH - 1) / OPTIONS_PER_BATCH;
-            eprint!("\rProcessing options: 0/{} (batch 0/{})    ", total, num_batches);
-        } else {
-            eprint!("\rProcessing options: 0/{}    ", total);
-        }
+        eprint!("\rProcessing options: 0/{}    ", total);
         io::stderr().flush().ok();
 
-        if use_caching {
-            // Build cached context once
-            let manpage_opt = if has_manpage {
-                Some(docs.manpage_text.as_str())
-            } else {
-                None
-            };
-            let cached_context = prompt::build_cached_context(&full_command, help_text, manpage_opt);
-
-            let num_batches = (total + OPTIONS_PER_BATCH - 1) / OPTIONS_PER_BATCH;
-            tracing::info!("Using prompt caching with {} options per batch ({} batches)", OPTIONS_PER_BATCH, num_batches);
-
-            // Prepare all batches upfront
-            let batches: Vec<(usize, Vec<Vec<String>>)> = extracted_flags
-                .chunks(OPTIONS_PER_BATCH)
-                .enumerate()
-                .map(|(idx, chunk)| (idx, chunk.to_vec()))
-                .collect();
-
-            // Process batches in parallel (MAX_CONCURRENT_REQUESTS at a time)
-            let mut completed_batches = 0;
-            for batch_chunk in batches.chunks(MAX_CONCURRENT_REQUESTS) {
-                let futures: Vec<_> = batch_chunk
-                    .iter()
-                    .map(|(batch_idx, chunk)| {
-                        let query = prompt::batched_option_query(chunk);
-                        let max_tokens = (chunk.len() * 450) as u32;
-                        let detail_system = detail_system.clone();
-                        let cached_context = cached_context.clone();
-                        let batch_idx = *batch_idx;
-
-                        async move {
-                            let batch_json = self.call_api_cached(&detail_system, &cached_context, &query, max_tokens).await?;
-
-                            // Parse as array of CommandOption
-                            let batch_options: Vec<CommandOption> = serde_json::from_str(&batch_json).map_err(|e| {
-                                tracing::warn!("Failed to parse batch {}: {}", batch_idx, e);
-
-                                // Save failed response to debug file
-                                if let Some(proj_dirs) = directories::ProjectDirs::from("", "", "quocli") {
-                                    let debug_dir = proj_dirs.data_dir().join("debug");
-                                    if std::fs::create_dir_all(&debug_dir).is_ok() {
-                                        let debug_file = debug_dir.join(format!("failed_batch_{}.json", batch_idx));
-                                        if let Err(write_err) = std::fs::write(&debug_file, &batch_json) {
-                                            tracing::warn!("Failed to save debug file: {}", write_err);
-                                        } else {
-                                            tracing::info!("Saved failed response to {:?}", debug_file);
-                                            eprintln!("\nDebug: Failed JSON saved to {:?}", debug_file);
-                                        }
-                                    }
-                                }
-
-                                QuocliError::Llm(format!("Failed to parse batch {}: {}", batch_idx, e))
-                            })?;
-
-                            Ok::<(usize, Vec<CommandOption>), QuocliError>((batch_idx, batch_options))
-                        }
-                    })
-                    .collect();
-
-                // Show progress before starting this chunk
-                eprint!("\rProcessing options: {}/{} (batches {}-{}/{})    ",
-                    detailed_options.len(), total,
-                    completed_batches + 1,
-                    (completed_batches + batch_chunk.len()).min(num_batches),
-                    num_batches);
-                io::stderr().flush().ok();
-
-                let mut batch_results = future::try_join_all(futures).await?;
-
-                // Sort by batch index to maintain order
-                batch_results.sort_by_key(|(idx, _)| *idx);
-
-                for (_, options) in batch_results {
-                    detailed_options.extend(options);
-                }
-
-                completed_batches += batch_chunk.len();
-            }
-
-            // Show final progress for batched mode
-            eprint!("\rProcessing options: {}/{} (batch {}/{})    ",
-                detailed_options.len(), total, num_batches, num_batches);
-            io::stderr().flush().ok();
+        // Build cached context with full help text and manpage
+        let manpage_opt = if has_manpage {
+            Some(docs.manpage_text.as_str())
         } else {
-            // Use simple approach for small number of options (no caching overhead)
-            let manpage_opt = if has_manpage {
-                Some(docs.manpage_text.as_str())
-            } else {
-                None
-            };
+            None
+        };
+        let cached_context = prompt::build_cached_context(&full_command, help_text, manpage_opt);
 
-            tracing::info!("Using simple approach for {} options (no caching)", total);
+        tracing::info!("Using prompt caching for {} options ({} concurrent)", total, MAX_CONCURRENT_REQUESTS);
 
-            let prompts: Vec<(Vec<String>, String)> = extracted_flags
+        // Process each option individually using cached context, in parallel
+        for chunk in extracted_flags.chunks(MAX_CONCURRENT_REQUESTS) {
+            let futures: Vec<_> = chunk
                 .iter()
                 .map(|flags| {
-                    let detail_user = prompt::option_detail_user_prompt(&full_command, flags, help_text, manpage_opt);
-                    (flags.clone(), detail_user)
+                    let flags = flags.clone();
+                    let query = prompt::single_option_query(&flags);
+                    let detail_system = detail_system.clone();
+                    let cached_context = cached_context.clone();
+
+                    async move {
+                        let detail_json = self.call_api_cached(&detail_system, &cached_context, &query, 512).await?;
+
+                        let detailed: CommandOption = serde_json::from_str(&detail_json).map_err(|e| {
+                            tracing::warn!("Failed to parse option details for {:?}: {}", flags, e);
+                            QuocliError::Llm(format!("Failed to parse option detail: {}", e))
+                        })?;
+
+                        Ok::<CommandOption, QuocliError>(detailed)
+                    }
                 })
                 .collect();
 
-            // Process concurrently
-            for chunk in prompts.chunks(MAX_CONCURRENT_REQUESTS) {
-                let futures: Vec<_> = chunk
-                    .iter()
-                    .map(|(flags, detail_user)| {
-                        let flags = flags.clone();
-                        let detail_user = detail_user.clone();
-                        let detail_system = detail_system.clone();
+            let batch_results = future::try_join_all(futures).await?;
+            detailed_options.extend(batch_results);
 
-                        async move {
-                            let detail_json = self.call_api(&detail_system, &detail_user, 1024).await?;
-
-                            let detailed: CommandOption = serde_json::from_str(&detail_json).map_err(|e| {
-                                tracing::warn!("Failed to parse option details for {:?}: {}", flags, e);
-                                QuocliError::Llm(format!("Failed to parse option detail: {}", e))
-                            })?;
-
-                            Ok::<CommandOption, QuocliError>(detailed)
-                        }
-                    })
-                    .collect();
-
-                let batch_results = future::try_join_all(futures).await?;
-                detailed_options.extend(batch_results);
-
-                // Show progress
-                eprint!("\rProcessing options: {}/{}    ", detailed_options.len(), total);
-                io::stderr().flush().ok();
-            }
+            // Show progress
+            eprint!("\rProcessing options: {}/{}    ", detailed_options.len(), total);
+            io::stderr().flush().ok();
         }
 
         // Clear the progress line

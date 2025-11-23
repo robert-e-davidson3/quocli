@@ -19,6 +19,41 @@ DOCUMENTATION:
 {help_text}{manpage_section}"#)
 }
 
+/// User prompt for single option extraction (used with cached context)
+pub fn single_option_query(flags: &[String]) -> String {
+    let flags_str = flags.join(", ");
+
+    format!(r#"Extract detailed information for this option: {}
+
+Return a JSON object with this structure:
+{{
+  "flags": ["-v", "--verbose"],
+  "description": "Detailed description of what this option does",
+  "argument_type": "bool",
+  "argument_name": null,
+  "required": false,
+  "sensitive": false,
+  "repeatable": false,
+  "conflicts_with": [],
+  "requires": [],
+  "default": null,
+  "enum_values": []
+}}
+
+Guidelines:
+- description: Full description from the documentation above
+- argument_type: "bool", "string", "int", "float", "path", or "enum"
+- sensitive: true if this typically contains secrets/tokens/passwords
+- conflicts_with: list of flags that cannot be used with this one
+- requires: list of flags that must be used with this one
+- enum_values: if argument_type is "enum", list allowed values
+- default: default value if specified
+
+Respond with only JSON, no other text."#,
+        flags_str
+    )
+}
+
 /// User prompt for batched option extraction (multiple options at once)
 pub fn batched_option_query(options: &[Vec<String>]) -> String {
     let options_list: Vec<String> = options
