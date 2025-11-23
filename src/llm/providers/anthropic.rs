@@ -102,9 +102,11 @@ impl AnthropicClient {
         cached_context: &str,
         user_query: &str,
         max_tokens: u32,
+        model_override: Option<&str>,
     ) -> Result<String, QuocliError> {
+        let model = model_override.map(|s| s.to_string()).unwrap_or_else(|| self.model.clone());
         let request = CachedAnthropicRequest {
-            model: self.model.clone(),
+            model,
             max_tokens,
             system: system.to_string(),
             messages: vec![CachedMessage {
@@ -393,7 +395,14 @@ JSON only, no other text."#,
                     let cached_context = cached_context.clone();
 
                     async move {
-                        let detail_json = self.call_api_cached(&detail_system, &cached_context, &query, 4096).await?;
+                        // Use Haiku for faster option extraction
+                        let detail_json = self.call_api_cached(
+                            &detail_system,
+                            &cached_context,
+                            &query,
+                            4096,
+                            Some("claude-haiku-4-5-20250514"),
+                        ).await?;
 
                         let detailed: CommandOption = serde_json::from_str(&detail_json).map_err(|e| {
                             tracing::warn!("Failed to parse option details for {:?}: {}", flags, e);
