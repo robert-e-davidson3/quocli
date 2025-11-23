@@ -180,12 +180,9 @@ impl FormState {
                 }
             }
             OptionTab::Frequent => {
-                if self.frequent_indices.is_empty() {
-                    // No frequent items, show all
-                    self.filtered_indices = (0..self.fields.len()).collect();
-                } else {
-                    self.filtered_indices = self.frequent_indices.clone();
-                }
+                // Only show options that have been used (have cached values)
+                // Don't fall back to all - empty is correct when nothing has been used
+                self.filtered_indices = self.frequent_indices.clone();
             }
         }
 
