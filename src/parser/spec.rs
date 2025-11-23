@@ -193,6 +193,8 @@ pub struct CommandOption {
     pub default: Option<String>,
     #[serde(default)]
     pub enum_values: Vec<String>,
+    #[serde(default)]
+    pub level: OptionLevel,
 }
 
 impl CommandOption {
@@ -287,6 +289,22 @@ pub enum DangerLevel {
     Medium,
     High,
     Critical,
+}
+
+/// Level indicating how commonly used an option is
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum OptionLevel {
+    /// Common options shown in basic --help
+    Basic,
+    /// Advanced options from --help all or manpage
+    Advanced,
+}
+
+impl Default for OptionLevel {
+    fn default() -> Self {
+        OptionLevel::Basic
+    }
 }
 
 impl Default for DangerLevel {
