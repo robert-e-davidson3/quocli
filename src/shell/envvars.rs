@@ -23,15 +23,6 @@ pub fn get_all_env_vars() -> HashMap<String, String> {
     env::vars().collect()
 }
 
-/// Generate a suggested environment variable name
-pub fn generate_env_var_name(command: &str, flag: &str) -> String {
-    let flag_clean = flag
-        .trim_start_matches('-')
-        .to_uppercase()
-        .replace('-', "_");
-    format!("QUOCLI_{}_{}", command.to_uppercase(), flag_clean)
-}
-
 /// Resolve environment variable references in a string value
 /// Supports both $VAR and ${VAR} syntax
 pub fn resolve_env_vars(value: &str) -> String {
@@ -113,18 +104,6 @@ pub fn get_env_suggestions(prefix: &str) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_generate_env_var_name() {
-        assert_eq!(
-            generate_env_var_name("curl", "--header"),
-            "QUOCLI_CURL_HEADER"
-        );
-        assert_eq!(
-            generate_env_var_name("git", "-m"),
-            "QUOCLI_GIT_M"
-        );
-    }
 
     #[test]
     fn test_resolve_env_vars() {
