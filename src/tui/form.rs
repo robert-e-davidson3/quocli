@@ -4,7 +4,7 @@ use crate::tui::theme::Theme;
 use crate::tui::widgets::{FormField, FormState, OptionTab};
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyModifiers},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -57,7 +57,7 @@ pub async fn run_form(
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -65,7 +65,7 @@ pub async fn run_form(
 
     // Restore terminal
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
 
     result
 }
@@ -82,7 +82,30 @@ fn run_form_loop(
         terminal.draw(|f| draw_form(f, state, spec, theme, config))?;
 
         // Handle input
-        if let Event::Key(key) = event::read()? {
+        let event = event::read()?;
+
+        // Handle mouse events for description scrolling
+        if let Event::Mouse(mouse) = event {
+            // Only scroll if description is shown (not editing, not showing suggestions)
+            if !state.editing && !state.showing_suggestions {
+                if let Some(field) = state.current_field() {
+                    if !field.description.is_empty() {
+                        // Estimate max scroll based on description length
+                        let max_scroll = estimate_max_scroll(&field.description, terminal.size()?.height);
+                        match mouse.kind {
+                            // Natural scrolling: scroll wheel up shows content above
+                            MouseEventKind::ScrollUp => state.scroll_description_up(),
+                            // Natural scrolling: scroll wheel down shows content below
+                            MouseEventKind::ScrollDown => state.scroll_description_down(max_scroll),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+
+        if let Event::Key(key) = event {
             if state.editing {
                 if state.showing_suggestions {
                     // Handle suggestion navigation
@@ -147,6 +170,19 @@ fn run_form_loop(
                     }
                     KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         state.clear_all_values()
+                    }
+                    // Description scrolling with Ctrl+Up/Down
+                    KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        state.scroll_description_up();
+                    }
+                    KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        if let Some(field) = state.current_field() {
+                            if !field.description.is_empty() {
+                                let term_height = terminal.size().map(|s| s.height).unwrap_or(24);
+                                let max_scroll = estimate_max_scroll(&field.description, term_height);
+                                state.scroll_description_down(max_scroll);
+                            }
+                        }
                     }
                     // Search: / for flag-only search, Ctrl+/ for including description
                     KeyCode::Char('/') => {
@@ -295,7 +331,7 @@ fn draw_form(
     } else if state.search_mode {
         "Type to search | Enter: select | Esc: clear"
     } else {
-        "↑/↓: navigate | Enter: edit | /: search | `: tabs | Ctrl+X: clear | Ctrl+E: execute | q: cancel"
+        "↑/↓: navigate | Ctrl+↑/↓: scroll desc | Enter: edit | /: search | `: tabs | Ctrl+E: execute | q: cancel"
     };
     let help = Paragraph::new(help_text).style(theme.help);
     f.render_widget(help, chunks[4]);
@@ -306,9 +342,24 @@ fn draw_form(
             if !field.description.is_empty() {
                 let area = centered_rect(60, 20, f.area());
                 f.render_widget(Clear, area);
+
+                // Calculate scroll info
+                let (_, can_scroll_up, can_scroll_down) =
+                    calc_scroll_info(&field.description, area, state.description_scroll);
+
+                // Build scroll indicator for title
+                let scroll_indicator = match (can_scroll_up, can_scroll_down) {
+                    (true, true) => " ↑↓",
+                    (true, false) => " ↑",
+                    (false, true) => " ↓",
+                    (false, false) => "",
+                };
+                let title = format!("Description{}", scroll_indicator);
+
                 let desc = Paragraph::new(field.description.clone())
-                    .block(Block::default().title("Description").borders(Borders::ALL))
-                    .wrap(Wrap { trim: true });
+                    .block(Block::default().title(title).borders(Borders::ALL))
+                    .wrap(Wrap { trim: true })
+                    .scroll((state.description_scroll, 0));
                 f.render_widget(desc, area);
             }
         }
@@ -488,4 +539,51 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+/// Estimate the maximum scroll offset for a description
+fn estimate_max_scroll(description: &str, terminal_height: u16) -> u16 {
+    // Popup is 20% of terminal height, minus 2 for borders
+    let popup_height = (terminal_height as f32 * 0.20) as u16;
+    let content_height = popup_height.saturating_sub(2);
+
+    if content_height == 0 {
+        return 0;
+    }
+
+    // Estimate wrapped lines: assume ~60 chars per line (60% of terminal width)
+    let chars_per_line = 50;
+    let estimated_lines = (description.len() as u16 / chars_per_line) + 1;
+
+    // Max scroll is the number of lines that don't fit
+    estimated_lines.saturating_sub(content_height)
+}
+
+/// Calculate scroll information for a description in the given area
+fn calc_scroll_info(description: &str, area: Rect, scroll_offset: u16) -> (u16, bool, bool) {
+    // Content area is area minus borders
+    let content_height = area.height.saturating_sub(2);
+    let content_width = area.width.saturating_sub(2);
+
+    if content_height == 0 || content_width == 0 {
+        return (0, false, false);
+    }
+
+    // Estimate wrapped lines
+    let mut total_lines = 0u16;
+    for line in description.lines() {
+        let line_len = line.len() as u16;
+        let wrapped = if line_len == 0 {
+            1
+        } else {
+            (line_len + content_width - 1) / content_width
+        };
+        total_lines += wrapped;
+    }
+
+    let max_scroll = total_lines.saturating_sub(content_height);
+    let can_scroll_up = scroll_offset > 0;
+    let can_scroll_down = scroll_offset < max_scroll;
+
+    (max_scroll, can_scroll_up, can_scroll_down)
 }
