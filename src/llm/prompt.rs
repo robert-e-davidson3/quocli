@@ -1,8 +1,67 @@
 /// Get detailed info for a single option
 pub fn option_detail_system_prompt() -> String {
-    r#"You are a CLI command parser. Extract detailed information about a specific command-line option.
+    r#"You are a CLI command parser. Extract detailed information about command-line options.
 
 Respond with valid JSON only, no markdown formatting."#.to_string()
+}
+
+/// Build the cached context containing help text and manpage
+pub fn build_cached_context(command: &str, help_text: &str, manpage_text: Option<&str>) -> String {
+    let manpage_section = if let Some(manpage) = manpage_text {
+        format!("\n\n--- MANPAGE ---\n{}", manpage)
+    } else {
+        String::new()
+    };
+
+    format!(r#"COMMAND: {command}
+
+DOCUMENTATION:
+{help_text}{manpage_section}"#)
+}
+
+/// User prompt for batched option extraction (multiple options at once)
+pub fn batched_option_query(options: &[Vec<String>]) -> String {
+    let options_list: Vec<String> = options
+        .iter()
+        .map(|flags| flags.join(", "))
+        .collect();
+
+    format!(r#"Extract detailed information for these {} options:
+{}
+
+Return a JSON array with one object per option, in the same order as listed above.
+Each object should have this structure:
+{{
+  "flags": ["-v", "--verbose"],
+  "description": "Detailed description of what this option does",
+  "argument_type": "bool",
+  "argument_name": null,
+  "required": false,
+  "sensitive": false,
+  "repeatable": false,
+  "conflicts_with": [],
+  "requires": [],
+  "default": null,
+  "enum_values": []
+}}
+
+Guidelines:
+- description: Full description from help text AND manpage if available
+- argument_type: "bool", "string", "int", "float", "path", or "enum"
+- sensitive: true if this typically contains secrets/tokens/passwords
+- conflicts_with: list of flags that cannot be used with this one
+- requires: list of flags that must be used with this one
+- enum_values: if argument_type is "enum", list allowed values
+- default: default value if specified
+
+Respond with only a JSON array, no other text."#,
+        options.len(),
+        options_list.iter()
+            .enumerate()
+            .map(|(i, o)| format!("{}. {}", i + 1, o))
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
 }
 
 /// User prompt: get details for one option

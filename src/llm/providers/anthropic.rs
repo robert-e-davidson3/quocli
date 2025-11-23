@@ -11,6 +11,9 @@ use std::io::{self, Write};
 /// Maximum concurrent API requests to avoid rate limiting
 const MAX_CONCURRENT_REQUESTS: usize = 10;
 
+/// Number of options to request per API call when batching
+const OPTIONS_PER_BATCH: usize = 16;
+
 pub struct AnthropicClient {
     api_key: String,
     model: String,
@@ -75,6 +78,94 @@ impl AnthropicClient {
                 }
                 Err(e) => {
                     // Only retry on connection/network errors
+                    if e.is_connect() || e.is_request() {
+                        last_error = Some(e);
+                        if attempt < retry_delays.len() {
+                            let delay = retry_delays[attempt];
+                            tracing::warn!("Connection error, retrying in {}ms (attempt {}/{})",
+                                delay, attempt + 1, retry_delays.len());
+                            tokio::time::sleep(tokio::time::Duration::from_millis(delay as u64)).await;
+                            continue;
+                        }
+                    } else {
+                        return Err(e.into());
+                    }
+                }
+            }
+        }
+
+        Err(last_error.map(|e| e.into()).unwrap_or_else(||
+            QuocliError::Llm("Max retries exceeded".to_string())))
+    }
+
+    /// Make an API call with prompt caching for the context
+    async fn call_api_cached(
+        &self,
+        system: &str,
+        cached_context: &str,
+        user_query: &str,
+        max_tokens: u32,
+    ) -> Result<String, QuocliError> {
+        let request = CachedAnthropicRequest {
+            model: self.model.clone(),
+            max_tokens,
+            system: system.to_string(),
+            messages: vec![CachedMessage {
+                role: "user".to_string(),
+                content: vec![
+                    CachedContentBlock {
+                        content_type: "text".to_string(),
+                        text: cached_context.to_string(),
+                        cache_control: Some(CacheControl {
+                            cache_type: "ephemeral".to_string(),
+                        }),
+                    },
+                    CachedContentBlock {
+                        content_type: "text".to_string(),
+                        text: user_query.to_string(),
+                        cache_control: None,
+                    },
+                ],
+            }],
+        };
+
+        let mut last_error = None;
+        let retry_delays = [2000, 4000, 8000, 16000];
+
+        for attempt in 0..=retry_delays.len() {
+            let result = self
+                .client
+                .post("https://api.anthropic.com/v1/messages")
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", "2023-06-01")
+                .header("anthropic-beta", "prompt-caching-2024-07-31")
+                .header("content-type", "application/json")
+                .json(&request)
+                .send()
+                .await;
+
+            match result {
+                Ok(response) => {
+                    if !response.status().is_success() {
+                        let status = response.status();
+                        let error_text = response.text().await.unwrap_or_default();
+                        return Err(QuocliError::Llm(format!(
+                            "API request failed with status {}: {}",
+                            status, error_text
+                        )));
+                    }
+
+                    let api_response: AnthropicResponse = response.json().await?;
+
+                    let text = api_response
+                        .content
+                        .first()
+                        .map(|c| c.text.clone())
+                        .ok_or_else(|| QuocliError::Llm("Empty response from API".to_string()))?;
+
+                    return Ok(strip_markdown_code_blocks(&text));
+                }
+                Err(e) => {
                     if e.is_connect() || e.is_request() {
                         last_error = Some(e);
                         if attempt < retry_delays.len() {
@@ -185,6 +276,36 @@ struct ContentBlock {
     text: String,
 }
 
+/// Request structure for cached API calls
+#[derive(Serialize)]
+struct CachedAnthropicRequest {
+    model: String,
+    max_tokens: u32,
+    system: String,
+    messages: Vec<CachedMessage>,
+}
+
+#[derive(Serialize)]
+struct CachedMessage {
+    role: String,
+    content: Vec<CachedContentBlock>,
+}
+
+#[derive(Serialize)]
+struct CachedContentBlock {
+    #[serde(rename = "type")]
+    content_type: String,
+    text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<CacheControl>,
+}
+
+#[derive(Serialize)]
+struct CacheControl {
+    #[serde(rename = "type")]
+    cache_type: String,
+}
+
 #[async_trait]
 impl LlmClient for AnthropicClient {
     async fn generate_spec(
@@ -245,66 +366,97 @@ JSON only, no other text."#,
 
         tracing::info!("Got metadata: {} options to process", extracted_flags.len());
 
-        // === PASS 2: Get details for each option (concurrent) ===
+        // === PASS 2: Get details for each option ===
         let detail_system = prompt::option_detail_system_prompt();
-
-        tracing::info!("Pass 2: Getting details for {} options concurrently (max {} parallel)",
-            extracted_flags.len(), MAX_CONCURRENT_REQUESTS);
-
-        // Prepare all prompts upfront
-        let manpage_opt = if has_manpage {
-            Some(docs.manpage_text.as_str())
-        } else {
-            None
-        };
-
-        let prompts: Vec<(usize, Vec<String>, String)> = extracted_flags
-            .iter()
-            .enumerate()
-            .map(|(i, flags)| {
-                let detail_user = prompt::option_detail_user_prompt(&full_command, flags, help_text, manpage_opt);
-                (i, flags.clone(), detail_user)
-            })
-            .collect();
-
-        // Process in batches to limit concurrency
-        let mut detailed_options: Vec<CommandOption> = Vec::with_capacity(prompts.len());
-        let total = prompts.len();
+        let total = extracted_flags.len();
+        let mut detailed_options: Vec<CommandOption> = Vec::with_capacity(total);
 
         // Show initial progress
         eprint!("\rProcessing options: 0/{}    ", total);
         io::stderr().flush().ok();
 
-        for chunk in prompts.chunks(MAX_CONCURRENT_REQUESTS) {
-            let futures: Vec<_> = chunk
+        // Use batching with caching if we have more options than the batch size
+        let use_caching = total > OPTIONS_PER_BATCH;
+
+        if use_caching {
+            // Build cached context once
+            let manpage_opt = if has_manpage {
+                Some(docs.manpage_text.as_str())
+            } else {
+                None
+            };
+            let cached_context = prompt::build_cached_context(&full_command, help_text, manpage_opt);
+
+            tracing::info!("Using prompt caching with {} options per batch", OPTIONS_PER_BATCH);
+
+            // Process in batches of OPTIONS_PER_BATCH
+            for chunk in extracted_flags.chunks(OPTIONS_PER_BATCH) {
+                let query = prompt::batched_option_query(chunk);
+
+                // Calculate max tokens based on batch size (about 200 tokens per option)
+                let max_tokens = (chunk.len() * 250) as u32;
+
+                let batch_json = self.call_api_cached(&detail_system, &cached_context, &query, max_tokens).await?;
+
+                // Parse as array of CommandOption
+                let batch_options: Vec<CommandOption> = serde_json::from_str(&batch_json).map_err(|e| {
+                    tracing::warn!("Failed to parse batched options: {}", e);
+                    QuocliError::Llm(format!("Failed to parse batched options: {}", e))
+                })?;
+
+                detailed_options.extend(batch_options);
+
+                // Show progress
+                eprint!("\rProcessing options: {}/{}    ", detailed_options.len(), total);
+                io::stderr().flush().ok();
+            }
+        } else {
+            // Use simple approach for small number of options (no caching overhead)
+            let manpage_opt = if has_manpage {
+                Some(docs.manpage_text.as_str())
+            } else {
+                None
+            };
+
+            tracing::info!("Using simple approach for {} options (no caching)", total);
+
+            let prompts: Vec<(Vec<String>, String)> = extracted_flags
                 .iter()
-                .map(|(i, flags, detail_user)| {
-                    let i = *i;
-                    let flags = flags.clone();
-                    let detail_user = detail_user.clone();
-                    let detail_system = detail_system.clone();
-
-                    async move {
-                        tracing::debug!("Getting details for option {}: {:?}", i + 1, flags);
-
-                        let detail_json = self.call_api(&detail_system, &detail_user, 1024).await?;
-
-                        let detailed: CommandOption = serde_json::from_str(&detail_json).map_err(|e| {
-                            tracing::warn!("Failed to parse option details for {:?}: {}", flags, e);
-                            QuocliError::Llm(format!("Failed to parse option detail: {}", e))
-                        })?;
-
-                        Ok::<CommandOption, QuocliError>(detailed)
-                    }
+                .map(|flags| {
+                    let detail_user = prompt::option_detail_user_prompt(&full_command, flags, help_text, manpage_opt);
+                    (flags.clone(), detail_user)
                 })
                 .collect();
 
-            let batch_results = future::try_join_all(futures).await?;
-            detailed_options.extend(batch_results);
+            // Process concurrently
+            for chunk in prompts.chunks(MAX_CONCURRENT_REQUESTS) {
+                let futures: Vec<_> = chunk
+                    .iter()
+                    .map(|(flags, detail_user)| {
+                        let flags = flags.clone();
+                        let detail_user = detail_user.clone();
+                        let detail_system = detail_system.clone();
 
-            // Show progress
-            eprint!("\rProcessing options: {}/{}    ", detailed_options.len(), total);
-            io::stderr().flush().ok();
+                        async move {
+                            let detail_json = self.call_api(&detail_system, &detail_user, 1024).await?;
+
+                            let detailed: CommandOption = serde_json::from_str(&detail_json).map_err(|e| {
+                                tracing::warn!("Failed to parse option details for {:?}: {}", flags, e);
+                                QuocliError::Llm(format!("Failed to parse option detail: {}", e))
+                            })?;
+
+                            Ok::<CommandOption, QuocliError>(detailed)
+                        }
+                    })
+                    .collect();
+
+                let batch_results = future::try_join_all(futures).await?;
+                detailed_options.extend(batch_results);
+
+                // Show progress
+                eprint!("\rProcessing options: {}/{}    ", detailed_options.len(), total);
+                io::stderr().flush().ok();
+            }
         }
 
         // Clear the progress line
