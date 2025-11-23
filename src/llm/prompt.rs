@@ -79,3 +79,27 @@ Guidelines:
 
 Respond with only JSON, no other text."#)
 }
+
+/// User prompt for extracting positional argument names from usage/synopsis
+pub fn extract_positional_args_query(usage_text: &str) -> String {
+    format!(r#"Analyze this command usage/synopsis and identify the positional arguments:
+
+{usage_text}
+
+Return a JSON array of positional argument names. Only include actual positional arguments that the user provides as values, NOT:
+- Option placeholders like "SHORT-OPTION", "OPTION", "OPTIONS"
+- Meta-syntax like "LONG-OPTION"
+- Flag descriptions
+
+For example:
+- "echo [STRING]..." -> ["STRING"]
+- "cp SOURCE DEST" -> ["SOURCE", "DEST"]
+- "mount <source> <directory>" -> ["source", "directory"]
+- "cat [OPTION]... [FILE]..." -> ["FILE"]
+
+Return the argument names in lowercase, as a JSON array like: ["arg1", "arg2"]
+
+If there are no positional arguments, return an empty array: []
+
+JSON array only, no other text."#)
+}

@@ -484,8 +484,18 @@ impl LlmClient for AnthropicClient {
         let extracted_flags = extract_flags_from_help(help_text);
         tracing::info!("Extracted {} flag groups from help text", extracted_flags.len());
 
-        let extracted_positional = extract_positional_args_from_help(help_text);
-        tracing::info!("Extracted {} positional args from help text", extracted_positional.len());
+        // Extract positional args using LLM (algorithmic approach can't handle semantic distinctions)
+        // Get first ~20 lines for usage/synopsis section
+        let usage_lines: String = help_text.lines().take(20).collect::<Vec<_>>().join("\n");
+        let positional_system = "You are a CLI command parser. Extract positional argument names from usage syntax.";
+        let positional_query = prompt::extract_positional_args_query(&usage_lines);
+
+        let positional_json = self.call_api(positional_system, &positional_query, 256).await?;
+        let positional_names: Vec<String> = serde_json::from_str(&positional_json).unwrap_or_else(|e| {
+            tracing::warn!("Failed to parse positional args JSON: {}", e);
+            vec![]
+        });
+        tracing::info!("Extracted {} positional arg names from help text", positional_names.len());
 
         // Get command metadata (description, danger level) with a small LLM call
         let metadata_system = "You are a CLI analyzer. Return only valid JSON.";
@@ -631,7 +641,7 @@ JSON only, no other text."#,
         tracing::info!("Successfully processed {} options", detailed_options.len());
 
         // === PASS 3: Get details for each positional argument ===
-        let pos_total = extracted_positional.len();
+        let pos_total = positional_names.len();
         let mut detailed_positional: Vec<PositionalArg> = Vec::with_capacity(pos_total);
 
         if pos_total > 0 {
@@ -661,8 +671,7 @@ JSON only, no other text."#,
             };
 
             // Process positional args with streaming concurrency
-            let arg_names: Vec<_> = extracted_positional.iter().map(|a| a.name.clone()).collect();
-            let mut arg_iter = arg_names.into_iter();
+            let mut arg_iter = positional_names.into_iter();
             let mut pos_in_flight: FuturesUnordered<BoxFuture<'_, Result<PositionalArg, QuocliError>>> = FuturesUnordered::new();
 
             // Start initial batch of concurrent requests
