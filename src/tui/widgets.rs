@@ -99,6 +99,8 @@ pub struct FormState {
     pub showing_suggestions: bool,
     pub env_suggestions: Vec<(String, String)>, // (name, value)
     pub selected_suggestion: usize,
+    // Description scroll state
+    pub description_scroll: u16,
 }
 
 impl FormState {
@@ -141,6 +143,7 @@ impl FormState {
             showing_suggestions: false,
             env_suggestions: Vec::new(),
             selected_suggestion: 0,
+            description_scroll: 0,
         }
     }
 
@@ -319,6 +322,7 @@ impl FormState {
 
         if current_pos > 0 {
             self.selected = self.filtered_indices[current_pos - 1];
+            self.description_scroll = 0; // Reset scroll when changing field
         }
     }
 
@@ -335,6 +339,21 @@ impl FormState {
 
         if current_pos < self.filtered_indices.len() - 1 {
             self.selected = self.filtered_indices[current_pos + 1];
+            self.description_scroll = 0; // Reset scroll when changing field
+        }
+    }
+
+    /// Scroll description up (show earlier content)
+    pub fn scroll_description_up(&mut self) {
+        if self.description_scroll > 0 {
+            self.description_scroll -= 1;
+        }
+    }
+
+    /// Scroll description down (show later content)
+    pub fn scroll_description_down(&mut self, max_scroll: u16) {
+        if self.description_scroll < max_scroll {
+            self.description_scroll += 1;
         }
     }
 
