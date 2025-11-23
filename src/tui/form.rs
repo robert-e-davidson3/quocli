@@ -91,14 +91,36 @@ fn run_form_loop(
                     KeyCode::Char(c) => state.insert_char(c),
                     _ => {}
                 }
+            } else if state.search_mode {
+                // Search mode key handling
+                match key.code {
+                    KeyCode::Esc => state.clear_search(),
+                    KeyCode::Enter => state.stop_search(),
+                    KeyCode::Backspace => state.search_delete_char(),
+                    KeyCode::Up => state.move_up(),
+                    KeyCode::Down => state.move_down(),
+                    KeyCode::Char(c) => state.search_insert_char(c),
+                    _ => {}
+                }
             } else {
                 match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => return Ok(None),
+                    KeyCode::Char('q') | KeyCode::Esc => {
+                        if !state.search_query.is_empty() {
+                            state.clear_search();
+                        } else {
+                            return Ok(None);
+                        }
+                    }
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         return Ok(None)
                     }
                     KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         return Ok(Some(state.get_values()))
+                    }
+                    // Search: / for flag-only search, Ctrl+/ for including description
+                    KeyCode::Char('/') => {
+                        let include_desc = key.modifiers.contains(KeyModifiers::CONTROL);
+                        state.start_search(include_desc);
                     }
                     KeyCode::Up | KeyCode::Char('k') => state.move_up(),
                     KeyCode::Down | KeyCode::Char('j') => state.move_down(),
@@ -127,14 +149,18 @@ fn draw_form(
     theme: &Theme,
     config: &Config,
 ) {
+    // Add search bar height when in search mode
+    let search_height = if state.search_mode || !state.search_query.is_empty() { 3 } else { 0 };
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .margin(1)
         .constraints([
-            Constraint::Length(3),  // Header
-            Constraint::Min(10),    // Form fields
-            Constraint::Length(5),  // Command preview
-            Constraint::Length(2),  // Help
+            Constraint::Length(3),              // Header
+            Constraint::Min(10),                // Form fields
+            Constraint::Length(5),              // Command preview
+            Constraint::Length(search_height),  // Search bar
+            Constraint::Length(2),              // Help
         ])
         .split(f.area());
 
@@ -157,13 +183,12 @@ fn draw_form(
     .block(Block::default().borders(Borders::BOTTOM));
     f.render_widget(header, chunks[0]);
 
-    // Form fields
-    let items: Vec<ListItem> = state
-        .fields
+    // Form fields - show only filtered results
+    let visible = state.visible_fields();
+    let items: Vec<ListItem> = visible
         .iter()
-        .enumerate()
         .map(|(i, field)| {
-            let is_selected = i == state.selected;
+            let is_selected = *i == state.selected;
             let style = if is_selected {
                 theme.selected
             } else if field.required {
@@ -187,8 +212,14 @@ fn draw_form(
         })
         .collect();
 
+    let title = if state.search_query.is_empty() {
+        format!("Options ({})", state.fields.len())
+    } else {
+        format!("Options ({}/{})", visible.len(), state.fields.len())
+    };
+
     let list = List::new(items)
-        .block(Block::default().title("Options").borders(Borders::ALL))
+        .block(Block::default().title(title).borders(Borders::ALL))
         .highlight_style(Style::default().add_modifier(Modifier::BOLD));
 
     f.render_widget(list, chunks[1]);
@@ -203,14 +234,27 @@ fn draw_form(
         f.render_widget(preview, chunks[2]);
     }
 
+    // Search bar
+    if state.search_mode || !state.search_query.is_empty() {
+        let search_indicator = if state.include_description { "Search (+ desc): " } else { "Search: " };
+        let cursor = if state.search_mode { "_" } else { "" };
+        let search_text = format!("{}{}{}", search_indicator, state.search_query, cursor);
+        let search = Paragraph::new(search_text)
+            .style(if state.search_mode { theme.selected } else { theme.normal })
+            .block(Block::default().borders(Borders::ALL));
+        f.render_widget(search, chunks[3]);
+    }
+
     // Help text
     let help_text = if state.editing {
         "ESC/Enter: finish editing | Backspace: delete"
+    } else if state.search_mode {
+        "Type to search | Enter: select | Esc: clear"
     } else {
-        "↑/↓: navigate | Enter: edit | Ctrl+E: execute | q/Esc: cancel"
+        "↑/↓: navigate | Enter: edit | /: search | Ctrl+E: execute | q: cancel"
     };
     let help = Paragraph::new(help_text).style(theme.help);
-    f.render_widget(help, chunks[3]);
+    f.render_widget(help, chunks[4]);
 
     // Show description popup when field is selected
     if let Some(field) = state.current_field() {

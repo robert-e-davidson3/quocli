@@ -73,16 +73,127 @@ pub struct FormState {
     pub selected: usize,
     pub editing: bool,
     pub cursor_pos: usize,
+    // Search state
+    pub search_mode: bool,
+    pub search_query: String,
+    pub filtered_indices: Vec<usize>,
+    pub include_description: bool,
 }
 
 impl FormState {
     pub fn new(fields: Vec<FormField>) -> Self {
+        let indices: Vec<usize> = (0..fields.len()).collect();
         Self {
             fields,
             selected: 0,
             editing: false,
             cursor_pos: 0,
+            search_mode: false,
+            search_query: String::new(),
+            filtered_indices: indices,
+            include_description: false,
         }
+    }
+
+    /// Start search mode
+    pub fn start_search(&mut self, include_description: bool) {
+        self.search_mode = true;
+        self.search_query.clear();
+        self.include_description = include_description;
+        self.update_filter();
+    }
+
+    /// Stop search mode
+    pub fn stop_search(&mut self) {
+        self.search_mode = false;
+    }
+
+    /// Clear search and show all fields
+    pub fn clear_search(&mut self) {
+        self.search_query.clear();
+        self.filtered_indices = (0..self.fields.len()).collect();
+        self.search_mode = false;
+        self.selected = 0;
+    }
+
+    /// Add character to search query
+    pub fn search_insert_char(&mut self, c: char) {
+        self.search_query.push(c);
+        self.update_filter();
+    }
+
+    /// Delete character from search query
+    pub fn search_delete_char(&mut self) {
+        self.search_query.pop();
+        self.update_filter();
+    }
+
+    /// Update filtered indices based on search query
+    pub fn update_filter(&mut self) {
+        if self.search_query.is_empty() {
+            self.filtered_indices = (0..self.fields.len()).collect();
+        } else {
+            let query = self.search_query.to_lowercase();
+
+            // Score and sort results - prefer exact flag matches
+            let mut scored: Vec<(usize, i32)> = self.fields
+                .iter()
+                .enumerate()
+                .filter_map(|(i, field)| {
+                    let label_lower = field.label.to_lowercase();
+                    let id_lower = field.id.to_lowercase();
+                    let desc_lower = field.description.to_lowercase();
+
+                    // Exact flag match gets highest priority
+                    if id_lower == query || label_lower.contains(&format!("{},", &query)) {
+                        return Some((i, 100));
+                    }
+
+                    // Flag starts with query
+                    if id_lower.starts_with(&query) || label_lower.starts_with(&query) {
+                        return Some((i, 50));
+                    }
+
+                    // Flag contains query
+                    if id_lower.contains(&query) || label_lower.contains(&query) {
+                        return Some((i, 25));
+                    }
+
+                    // Description contains query (if enabled)
+                    if self.include_description && desc_lower.contains(&query) {
+                        return Some((i, 10));
+                    }
+
+                    None
+                })
+                .collect();
+
+            // Sort by score descending
+            scored.sort_by(|a, b| b.1.cmp(&a.1));
+            self.filtered_indices = scored.into_iter().map(|(i, _)| i).collect();
+        }
+
+        // Adjust selected to stay within filtered results
+        if !self.filtered_indices.is_empty() {
+            // Try to keep the currently selected field if it's still in the filtered list
+            if let Some(current_idx) = self.fields.get(self.selected).and_then(|_| {
+                self.filtered_indices.iter().position(|&i| i == self.selected)
+            }) {
+                // Current selection is still visible, keep it selected in filtered view
+                self.selected = self.filtered_indices[current_idx.min(self.filtered_indices.len() - 1)];
+            } else {
+                // Current selection is not visible, select first filtered item
+                self.selected = self.filtered_indices[0];
+            }
+        }
+    }
+
+    /// Get visible fields (filtered)
+    pub fn visible_fields(&self) -> Vec<(usize, &FormField)> {
+        self.filtered_indices
+            .iter()
+            .map(|&i| (i, &self.fields[i]))
+            .collect()
     }
 
     pub fn current_field(&self) -> Option<&FormField> {
@@ -94,14 +205,34 @@ impl FormState {
     }
 
     pub fn move_up(&mut self) {
-        if self.selected > 0 {
-            self.selected -= 1;
+        if self.filtered_indices.is_empty() {
+            return;
+        }
+
+        // Find current position in filtered list
+        let current_pos = self.filtered_indices
+            .iter()
+            .position(|&i| i == self.selected)
+            .unwrap_or(0);
+
+        if current_pos > 0 {
+            self.selected = self.filtered_indices[current_pos - 1];
         }
     }
 
     pub fn move_down(&mut self) {
-        if self.selected < self.fields.len().saturating_sub(1) {
-            self.selected += 1;
+        if self.filtered_indices.is_empty() {
+            return;
+        }
+
+        // Find current position in filtered list
+        let current_pos = self.filtered_indices
+            .iter()
+            .position(|&i| i == self.selected)
+            .unwrap_or(0);
+
+        if current_pos < self.filtered_indices.len() - 1 {
+            self.selected = self.filtered_indices[current_pos + 1];
         }
     }
 
