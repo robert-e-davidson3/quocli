@@ -39,7 +39,7 @@ impl FormField {
             field_type: opt.argument_type.clone(),
             required: opt.required,
             sensitive: opt.sensitive,
-            value: opt.default.clone().unwrap_or_default(),
+            value: String::new(),
             enum_values: opt.enum_values.clone(),
             default: opt.default.clone(),
         }
@@ -53,7 +53,7 @@ impl FormField {
             field_type: arg.argument_type.clone(),
             required: arg.required,
             sensitive: arg.sensitive,
-            value: arg.default.clone().unwrap_or_default(),
+            value: String::new(),
             enum_values: vec![],
             default: arg.default.clone(),
         }
