@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use std::io::{self, Write};
 
 /// Maximum concurrent API requests to avoid rate limiting
-const MAX_CONCURRENT_REQUESTS: usize = 5;
+const MAX_CONCURRENT_REQUESTS: usize = 10;
 
 pub struct AnthropicClient {
     api_key: String,
@@ -384,12 +384,34 @@ JSON only, no other text."#,
         eprint!("\rProcessing options: 0/{}    ", total);
         io::stderr().flush().ok();
 
-        // Process each option individually using cached context, in parallel
-        for chunk in extracted_flags.chunks(MAX_CONCURRENT_REQUESTS) {
+        // Process first option alone to warm the cache
+        if let Some(first_flags) = extracted_flags.first() {
+            let query = prompt::single_option_query(first_flags);
+            let detail_json = self.call_api_cached(
+                &detail_system,
+                &cached_context,
+                &query,
+                4096,
+                Some("claude-3-5-haiku-20241022"),
+            ).await?;
+
+            let detailed: CommandOption = serde_json::from_str(&detail_json).map_err(|e| {
+                tracing::warn!("Failed to parse option details for {:?}: {}", first_flags, e);
+                QuocliError::Llm(format!("Failed to parse option detail: {}", e))
+            })?;
+
+            detailed_options.push(detailed);
+            eprint!("\rProcessing options: 1/{}    ", total);
+            io::stderr().flush().ok();
+        }
+
+        // Process remaining options with full concurrency (cache is now warm)
+        let remaining_flags: Vec<_> = extracted_flags.iter().skip(1).collect();
+        for chunk in remaining_flags.chunks(MAX_CONCURRENT_REQUESTS) {
             let futures: Vec<_> = chunk
                 .iter()
                 .map(|flags| {
-                    let flags = flags.clone();
+                    let flags = (*flags).clone();
                     let query = prompt::single_option_query(&flags);
                     let detail_system = detail_system.clone();
                     let cached_context = cached_context.clone();
