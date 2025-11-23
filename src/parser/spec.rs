@@ -1,4 +1,101 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+/// Custom deserializer for Option<String> that handles LLM returning boolean/number instead of null
+fn deserialize_optional_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::{self, Visitor};
+
+    struct OptionalStringVisitor;
+
+    impl<'de> Visitor<'de> for OptionalStringVisitor {
+        type Value = Option<String>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("null, string, boolean, or number")
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(None)
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(None)
+        }
+
+        fn visit_bool<E>(self, v: bool) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            // LLM sometimes returns false instead of null - treat as None
+            // If it's true, could be interpreted as "true" string
+            if v {
+                Ok(Some("true".to_string()))
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(Some(v.to_string()))
+        }
+
+        fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(Some(v.to_string()))
+        }
+
+        fn visit_f64<E>(self, v: f64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(Some(v.to_string()))
+        }
+
+        fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            if v.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(v.to_string()))
+            }
+        }
+
+        fn visit_string<E>(self, v: String) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            if v.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(v))
+            }
+        }
+
+        fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            deserializer.deserialize_any(OptionalStringVisitor)
+        }
+    }
+
+    deserializer.deserialize_any(OptionalStringVisitor)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandSpec {
@@ -17,7 +114,7 @@ pub struct CommandOption {
     pub flags: Vec<String>,
     pub description: String,
     pub argument_type: ArgumentType,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     pub argument_name: Option<String>,
     #[serde(default)]
     pub required: bool,
@@ -29,7 +126,7 @@ pub struct CommandOption {
     pub conflicts_with: Vec<String>,
     #[serde(default)]
     pub requires: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     pub default: Option<String>,
     #[serde(default)]
     pub enum_values: Vec<String>,
@@ -64,7 +161,7 @@ pub struct PositionalArg {
     pub sensitive: bool,
     #[serde(default)]
     pub argument_type: ArgumentType,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     pub default: Option<String>,
 }
 

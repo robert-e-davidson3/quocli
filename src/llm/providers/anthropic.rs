@@ -271,6 +271,10 @@ JSON only, no other text."#,
         let mut detailed_options: Vec<CommandOption> = Vec::with_capacity(prompts.len());
         let total = prompts.len();
 
+        // Show initial progress
+        eprint!("\rProcessing options: 0/{}    ", total);
+        io::stderr().flush().ok();
+
         for chunk in prompts.chunks(MAX_CONCURRENT_REQUESTS) {
             let futures: Vec<_> = chunk
                 .iter()
