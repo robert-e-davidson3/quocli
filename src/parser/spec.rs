@@ -97,6 +97,68 @@ where
     deserializer.deserialize_any(OptionalStringVisitor)
 }
 
+/// Custom deserializer for String that handles LLM returning boolean/number instead of string
+fn deserialize_flexible_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::{self, Visitor};
+
+    struct FlexibleStringVisitor;
+
+    impl<'de> Visitor<'de> for FlexibleStringVisitor {
+        type Value = String;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("string, boolean, or number")
+        }
+
+        fn visit_bool<E>(self, v: bool) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(v.to_string())
+        }
+
+        fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(v.to_string())
+        }
+
+        fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(v.to_string())
+        }
+
+        fn visit_f64<E>(self, v: f64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(v.to_string())
+        }
+
+        fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(v.to_string())
+        }
+
+        fn visit_string<E>(self, v: String) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(v)
+        }
+    }
+
+    deserializer.deserialize_any(FlexibleStringVisitor)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandSpec {
     pub command: String,
@@ -112,6 +174,7 @@ pub struct CommandSpec {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandOption {
     pub flags: Vec<String>,
+    #[serde(deserialize_with = "deserialize_flexible_string")]
     pub description: String,
     pub argument_type: ArgumentType,
     #[serde(default, deserialize_with = "deserialize_optional_string")]

@@ -84,12 +84,40 @@ fn run_form_loop(
         // Handle input
         if let Event::Key(key) = event::read()? {
             if state.editing {
-                match key.code {
-                    KeyCode::Esc => state.stop_editing(),
-                    KeyCode::Enter => state.stop_editing(),
-                    KeyCode::Backspace => state.delete_char(),
-                    KeyCode::Char(c) => state.insert_char(c),
-                    _ => {}
+                if state.showing_suggestions {
+                    // Handle suggestion navigation
+                    match key.code {
+                        KeyCode::Esc => state.cancel_suggestions(),
+                        KeyCode::Tab | KeyCode::Enter => {
+                            state.accept_suggestion();
+                            state.update_env_suggestions();
+                        }
+                        KeyCode::Up => state.prev_suggestion(),
+                        KeyCode::Down => state.next_suggestion(),
+                        KeyCode::Backspace => {
+                            state.delete_char();
+                            state.update_env_suggestions();
+                        }
+                        KeyCode::Char(c) => {
+                            state.insert_char(c);
+                            state.update_env_suggestions();
+                        }
+                        _ => {}
+                    }
+                } else {
+                    match key.code {
+                        KeyCode::Esc => state.stop_editing(),
+                        KeyCode::Enter => state.stop_editing(),
+                        KeyCode::Backspace => {
+                            state.delete_char();
+                            state.update_env_suggestions();
+                        }
+                        KeyCode::Char(c) => {
+                            state.insert_char(c);
+                            state.update_env_suggestions();
+                        }
+                        _ => {}
+                    }
                 }
             } else if state.search_mode {
                 // Search mode key handling
@@ -256,7 +284,11 @@ fn draw_form(
 
     // Help text
     let help_text = if state.editing {
-        "ESC/Enter: finish editing | Backspace: delete"
+        if state.showing_suggestions {
+            "↑/↓: select | Tab/Enter: accept | Esc: cancel | Type $VAR for env vars"
+        } else {
+            "ESC/Enter: finish editing | Type $VAR for env vars"
+        }
     } else if state.search_mode {
         "Type to search | Enter: select | Esc: clear"
     } else {
@@ -265,17 +297,74 @@ fn draw_form(
     let help = Paragraph::new(help_text).style(theme.help);
     f.render_widget(help, chunks[4]);
 
-    // Show description popup when field is selected
-    if let Some(field) = state.current_field() {
-        if !field.description.is_empty() {
-            let area = centered_rect(60, 20, f.area());
-            f.render_widget(Clear, area);
-            let desc = Paragraph::new(field.description.clone())
-                .block(Block::default().title("Description").borders(Borders::ALL))
-                .wrap(Wrap { trim: true });
-            f.render_widget(desc, area);
+    // Show description popup when field is selected (but not when showing suggestions)
+    if !state.showing_suggestions {
+        if let Some(field) = state.current_field() {
+            if !field.description.is_empty() {
+                let area = centered_rect(60, 20, f.area());
+                f.render_widget(Clear, area);
+                let desc = Paragraph::new(field.description.clone())
+                    .block(Block::default().title("Description").borders(Borders::ALL))
+                    .wrap(Wrap { trim: true });
+                f.render_widget(desc, area);
+            }
         }
     }
+
+    // Show env var suggestions popup when available
+    if state.showing_suggestions && !state.env_suggestions.is_empty() {
+        let items: Vec<ListItem> = state
+            .env_suggestions
+            .iter()
+            .enumerate()
+            .map(|(i, (name, value))| {
+                let style = if i == state.selected_suggestion {
+                    theme.selected
+                } else {
+                    theme.normal
+                };
+                // Truncate value if too long
+                let display_value = if value.len() > 30 {
+                    format!("{}...", &value[..27])
+                } else {
+                    value.clone()
+                };
+                ListItem::new(Line::from(Span::styled(
+                    format!("${} = {}", name, display_value),
+                    style,
+                )))
+            })
+            .collect();
+
+        // Position the popup near the current field
+        let area = suggestion_rect(50, state.env_suggestions.len() as u16 + 2, f.area());
+        f.render_widget(Clear, area);
+        let list = List::new(items)
+            .block(Block::default().title("Env Variables (Tab/Enter to select)").borders(Borders::ALL));
+        f.render_widget(list, area);
+    }
+}
+
+/// Helper function to create a rect for suggestions popup
+fn suggestion_rect(width: u16, height: u16, r: Rect) -> Rect {
+    let height = height.min(15); // Max height of 15
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(40),
+            Constraint::Length(height),
+            Constraint::Min(0),
+        ])
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(25),
+            Constraint::Length(width),
+            Constraint::Min(0),
+        ])
+        .split(popup_layout[1])[1]
 }
 
 fn build_preview(spec: &CommandSpec, state: &FormState) -> String {

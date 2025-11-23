@@ -1,4 +1,5 @@
 use crate::parser::{ArgumentType, CommandSpec};
+use crate::shell::resolve_and_convert;
 use crate::QuocliError;
 use std::collections::HashMap;
 use std::process::Stdio;
@@ -33,16 +34,19 @@ pub fn build_command(spec: &CommandSpec, values: &HashMap<String, String>) -> St
                 continue;
             }
 
+            // Resolve environment variables and convert to appropriate type
+            let resolved = resolve_and_convert(value, &opt.argument_type);
+
             match opt.argument_type {
                 ArgumentType::Bool => {
-                    if value == "true" {
+                    if resolved == "true" {
                         parts.push(primary.to_string());
                     }
                 }
                 ArgumentType::Path => {
                     parts.push(primary.to_string());
                     // Expand tilde for path arguments
-                    let expanded = shellexpand::tilde(value).to_string();
+                    let expanded = shellexpand::tilde(&resolved).to_string();
                     if expanded.contains(' ') {
                         parts.push(format!("\"{}\"", expanded));
                     } else {
@@ -52,10 +56,10 @@ pub fn build_command(spec: &CommandSpec, values: &HashMap<String, String>) -> St
                 _ => {
                     parts.push(primary.to_string());
                     // Quote values with spaces
-                    if value.contains(' ') {
-                        parts.push(format!("\"{}\"", value));
+                    if resolved.contains(' ') {
+                        parts.push(format!("\"{}\"", resolved));
                     } else {
-                        parts.push(value.clone());
+                        parts.push(resolved);
                     }
                 }
             }
@@ -65,15 +69,18 @@ pub fn build_command(spec: &CommandSpec, values: &HashMap<String, String>) -> St
     // Add positional arguments at the end (also expand tilde for paths)
     for (key, value) in positional_values {
         // Check if this positional arg is a path type
-        let is_path = spec.positional_args.iter()
+        let arg_type = spec.positional_args.iter()
             .find(|a| format!("_pos_{}", a.name) == key)
-            .map(|a| a.argument_type == ArgumentType::Path)
-            .unwrap_or(false);
+            .map(|a| a.argument_type.clone())
+            .unwrap_or(ArgumentType::String);
 
-        let final_value = if is_path {
-            shellexpand::tilde(&value).to_string()
+        // Resolve environment variables and convert to appropriate type
+        let resolved = resolve_and_convert(&value, &arg_type);
+
+        let final_value = if arg_type == ArgumentType::Path {
+            shellexpand::tilde(&resolved).to_string()
         } else {
-            value
+            resolved
         };
 
         if final_value.contains(' ') {
