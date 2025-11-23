@@ -6,7 +6,24 @@ use std::process::Command;
 pub fn get_help_text(command: &str, subcommands: &[String]) -> Result<String, QuocliError> {
     let mut args: Vec<&str> = subcommands.iter().map(|s| s.as_str()).collect();
 
-    // Try --help first
+    // Try extended help variants first (for commands like curl that have truncated default help)
+    for extended in &["--help", "all", "--help=all", "--help-all"] {
+        let mut extended_args = args.clone();
+        if *extended == "--help" {
+            extended_args.push("--help");
+            extended_args.push("all");
+        } else {
+            extended_args.push(extended);
+        }
+        if let Ok(output) = try_command(command, &extended_args) {
+            // Extended help should be substantial
+            if !output.is_empty() && output.len() > 500 {
+                return Ok(output);
+            }
+        }
+    }
+
+    // Try --help
     args.push("--help");
     if let Ok(output) = try_command(command, &args) {
         if !output.is_empty() && output.len() > 50 {
