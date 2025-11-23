@@ -129,7 +129,6 @@ impl AnthropicClient {
             }],
         };
 
-        let mut last_error = None;
         let retry_delays = [2000, 4000, 8000, 16000];
 
         for attempt in 0..=retry_delays.len() {
@@ -146,8 +145,26 @@ impl AnthropicClient {
 
             match result {
                 Ok(response) => {
-                    if !response.status().is_success() {
-                        let status = response.status();
+                    let status = response.status();
+
+                    // Retry on 529 (Overloaded) or 503 (Service Unavailable)
+                    if status.as_u16() == 529 || status.as_u16() == 503 {
+                        if attempt < retry_delays.len() {
+                            let delay = retry_delays[attempt];
+                            tracing::warn!("API overloaded ({}), retrying in {}ms (attempt {}/{})",
+                                status, delay, attempt + 1, retry_delays.len());
+                            tokio::time::sleep(tokio::time::Duration::from_millis(delay as u64)).await;
+                            continue;
+                        } else {
+                            let error_text = response.text().await.unwrap_or_default();
+                            return Err(QuocliError::Llm(format!(
+                                "API overloaded after {} retries: {}",
+                                retry_delays.len(), error_text
+                            )));
+                        }
+                    }
+
+                    if !status.is_success() {
                         let error_text = response.text().await.unwrap_or_default();
                         return Err(QuocliError::Llm(format!(
                             "API request failed with status {}: {}",
@@ -167,7 +184,6 @@ impl AnthropicClient {
                 }
                 Err(e) => {
                     if e.is_connect() || e.is_request() {
-                        last_error = Some(e);
                         if attempt < retry_delays.len() {
                             let delay = retry_delays[attempt];
                             tracing::warn!("Connection error, retrying in {}ms (attempt {}/{})",
@@ -175,15 +191,13 @@ impl AnthropicClient {
                             tokio::time::sleep(tokio::time::Duration::from_millis(delay as u64)).await;
                             continue;
                         }
-                    } else {
-                        return Err(e.into());
                     }
+                    return Err(e.into());
                 }
             }
         }
 
-        Err(last_error.map(|e| e.into()).unwrap_or_else(||
-            QuocliError::Llm("Max retries exceeded".to_string())))
+        Err(QuocliError::Llm("Max retries exceeded".to_string()))
     }
 }
 
