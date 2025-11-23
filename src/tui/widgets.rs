@@ -1,6 +1,13 @@
 use crate::parser::{ArgumentType, CommandOption, PositionalArg};
 use std::collections::HashMap;
 
+/// Tab categories for organizing options
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum OptionTab {
+    All,
+    Frequent,
+}
+
 /// Form field representing a single input
 #[derive(Debug, Clone)]
 pub struct FormField {
@@ -78,6 +85,9 @@ pub struct FormState {
     pub search_query: String,
     pub filtered_indices: Vec<usize>,
     pub include_description: bool,
+    // Tab state
+    pub current_tab: OptionTab,
+    pub frequent_indices: Vec<usize>, // indices of fields that have cached values
 }
 
 impl FormState {
@@ -92,6 +102,50 @@ impl FormState {
             search_query: String::new(),
             filtered_indices: indices,
             include_description: false,
+            current_tab: OptionTab::All,
+            frequent_indices: Vec::new(),
+        }
+    }
+
+    /// Cycle to next tab
+    pub fn next_tab(&mut self) {
+        self.current_tab = match self.current_tab {
+            OptionTab::All => OptionTab::Frequent,
+            OptionTab::Frequent => OptionTab::All,
+        };
+        self.apply_tab_filter();
+    }
+
+    /// Set specific tab
+    pub fn set_tab(&mut self, tab: OptionTab) {
+        self.current_tab = tab;
+        self.apply_tab_filter();
+    }
+
+    /// Apply tab-based filtering
+    fn apply_tab_filter(&mut self) {
+        match self.current_tab {
+            OptionTab::All => {
+                self.filtered_indices = (0..self.fields.len()).collect();
+            }
+            OptionTab::Frequent => {
+                if self.frequent_indices.is_empty() {
+                    // No frequent items, show all
+                    self.filtered_indices = (0..self.fields.len()).collect();
+                } else {
+                    self.filtered_indices = self.frequent_indices.clone();
+                }
+            }
+        }
+
+        // Re-apply search filter if there's an active search
+        if !self.search_query.is_empty() {
+            self.update_filter();
+        } else {
+            // Ensure selection is valid
+            if !self.filtered_indices.is_empty() && !self.filtered_indices.contains(&self.selected) {
+                self.selected = self.filtered_indices[0];
+            }
         }
     }
 
@@ -300,11 +354,13 @@ impl FormState {
             .collect()
     }
 
-    /// Load cached values
+    /// Load cached values and track frequent fields
     pub fn load_cached_values(&mut self, cached: &HashMap<String, String>) {
-        for field in &mut self.fields {
+        self.frequent_indices.clear();
+        for (i, field) in self.fields.iter_mut().enumerate() {
             if let Some(value) = cached.get(&field.id) {
                 field.value = value.clone();
+                self.frequent_indices.push(i);
             }
         }
     }

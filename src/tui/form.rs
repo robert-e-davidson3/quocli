@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::parser::{ArgumentType, CommandSpec, DangerLevel};
 use crate::tui::theme::Theme;
-use crate::tui::widgets::{FormField, FormState};
+use crate::tui::widgets::{FormField, FormState, OptionTab};
 use anyhow::Result;
 use crossterm::{
     event::{self, Event, KeyCode, KeyModifiers},
@@ -122,6 +122,10 @@ fn run_form_loop(
                         let include_desc = key.modifiers.contains(KeyModifiers::CONTROL);
                         state.start_search(include_desc);
                     }
+                    // Tab switching
+                    KeyCode::Char('`') => state.next_tab(),
+                    KeyCode::Char('1') => state.set_tab(OptionTab::All),
+                    KeyCode::Char('2') => state.set_tab(OptionTab::Frequent),
                     KeyCode::Up | KeyCode::Char('k') => state.move_up(),
                     KeyCode::Down | KeyCode::Char('j') => state.move_down(),
                     KeyCode::Enter => {
@@ -212,10 +216,15 @@ fn draw_form(
         })
         .collect();
 
+    // Build title showing tab and count
+    let tab_name = match state.current_tab {
+        OptionTab::All => "All",
+        OptionTab::Frequent => "Frequent",
+    };
     let title = if state.search_query.is_empty() {
-        format!("Options ({})", state.fields.len())
+        format!("[{}] Options ({})", tab_name, visible.len())
     } else {
-        format!("Options ({}/{})", visible.len(), state.fields.len())
+        format!("[{}] Options ({}/{})", tab_name, visible.len(), state.fields.len())
     };
 
     let list = List::new(items)
@@ -251,7 +260,7 @@ fn draw_form(
     } else if state.search_mode {
         "Type to search | Enter: select | Esc: clear"
     } else {
-        "↑/↓: navigate | Enter: edit | /: search | Ctrl+E: execute | q: cancel"
+        "↑/↓: navigate | Enter: edit | /: search | `: tabs | Ctrl+E: execute | q: cancel"
     };
     let help = Paragraph::new(help_text).style(theme.help);
     f.render_widget(help, chunks[4]);
