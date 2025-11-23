@@ -68,8 +68,7 @@ pub struct PositionalArg {
     pub default: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArgumentType {
     Bool,
     String,
@@ -77,6 +76,42 @@ pub enum ArgumentType {
     Float,
     Path,
     Enum,
+}
+
+// Custom deserializer to handle LLM variations like "file" -> "path"
+impl<'de> serde::Deserialize<'de> for ArgumentType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = std::string::String::deserialize(deserializer)?;
+        match s.to_lowercase().as_str() {
+            "bool" | "boolean" | "flag" => Ok(ArgumentType::Bool),
+            "string" | "str" | "text" => Ok(ArgumentType::String),
+            "int" | "integer" | "number" => Ok(ArgumentType::Int),
+            "float" | "decimal" | "double" => Ok(ArgumentType::Float),
+            "path" | "file" | "filename" | "filepath" | "directory" | "dir" => Ok(ArgumentType::Path),
+            "enum" | "choice" | "select" | "option" => Ok(ArgumentType::Enum),
+            _ => Ok(ArgumentType::String), // Default to string for unknown types
+        }
+    }
+}
+
+impl serde::Serialize for ArgumentType {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let s = match self {
+            ArgumentType::Bool => "bool",
+            ArgumentType::String => "string",
+            ArgumentType::Int => "int",
+            ArgumentType::Float => "float",
+            ArgumentType::Path => "path",
+            ArgumentType::Enum => "enum",
+        };
+        serializer.serialize_str(s)
+    }
 }
 
 impl Default for ArgumentType {
