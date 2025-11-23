@@ -393,7 +393,7 @@ JSON only, no other text."#,
                     let cached_context = cached_context.clone();
 
                     async move {
-                        let detail_json = self.call_api_cached(&detail_system, &cached_context, &query, 1024).await?;
+                        let detail_json = self.call_api_cached(&detail_system, &cached_context, &query, 4096).await?;
 
                         let detailed: CommandOption = serde_json::from_str(&detail_json).map_err(|e| {
                             tracing::warn!("Failed to parse option details for {:?}: {}", flags, e);
