@@ -19,12 +19,23 @@ use ratatui::{
 use std::collections::HashMap;
 use std::io;
 
+/// Result of running the form
+#[derive(Debug)]
+pub enum FormResult {
+    /// User wants to execute the command
+    Execute(HashMap<String, String>),
+    /// User wants to preview the command without executing
+    Preview(HashMap<String, String>),
+    /// User cancelled the form
+    Cancel,
+}
+
 /// Run the interactive form
 pub async fn run_form(
     config: &Config,
     spec: &CommandSpec,
     cached_values: HashMap<String, String>,
-) -> Result<Option<HashMap<String, String>>> {
+) -> Result<FormResult> {
     // Build form fields
     let mut fields: Vec<FormField> = Vec::new();
 
@@ -40,7 +51,7 @@ pub async fn run_form(
 
     if fields.is_empty() {
         // No fields to edit, just return empty values
-        return Ok(Some(HashMap::new()));
+        return Ok(FormResult::Execute(HashMap::new()));
     }
 
     // Create form state
@@ -76,7 +87,7 @@ fn run_form_loop(
     spec: &CommandSpec,
     theme: &Theme,
     config: &Config,
-) -> Result<Option<HashMap<String, String>>> {
+) -> Result<FormResult> {
     loop {
         // Draw UI
         terminal.draw(|f| draw_form(f, state, spec, theme, config))?;
@@ -159,14 +170,17 @@ fn run_form_loop(
                         if !state.search_query.is_empty() {
                             state.clear_search();
                         } else {
-                            return Ok(None);
+                            return Ok(FormResult::Cancel);
                         }
                     }
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        return Ok(None)
+                        return Ok(FormResult::Cancel)
                     }
                     KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        return Ok(Some(state.get_values()))
+                        return Ok(FormResult::Execute(state.get_values()))
+                    }
+                    KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        return Ok(FormResult::Preview(state.get_values()))
                     }
                     KeyCode::Char('x') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         state.clear_all_values()
@@ -333,7 +347,7 @@ fn draw_form(
     } else if state.search_mode {
         "Type to search | Enter: select | Esc: clear"
     } else {
-        "↑/↓: navigate | Ctrl+↑/↓: scroll desc | Enter: edit | /: search | 1/2/3: Basic/Adv/Freq | Ctrl+X: clear | Ctrl+E: exec | q: cancel"
+        "↑/↓: nav | Ctrl+↑/↓: scroll | Enter: edit | /: search | 1/2/3: tabs | Ctrl+X: clear | Ctrl+E: exec | Ctrl+P: preview | q: cancel"
     };
     let help = Paragraph::new(help_text).style(theme.help);
     f.render_widget(help, chunks[4]);
