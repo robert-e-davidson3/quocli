@@ -392,7 +392,7 @@ JSON only, no other text."#,
                 &cached_context,
                 &query,
                 4096,
-                Some("claude-3-5-haiku-20241022"),
+                Some("claude-haiku-4-5-20251001"),
             ).await?;
 
             let detailed: CommandOption = serde_json::from_str(&detail_json).map_err(|e| {
@@ -426,7 +426,7 @@ JSON only, no other text."#,
                             &cached_context,
                             &query,
                             4096,
-                            Some("claude-3-5-haiku-20241022"),
+                            Some("claude-haiku-4-5-20251001"),
                         ).await?;
 
                         let detailed: CommandOption = serde_json::from_str(&detail_json).map_err(|e| {
