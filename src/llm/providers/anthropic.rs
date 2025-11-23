@@ -395,42 +395,72 @@ JSON only, no other text."#,
             let num_batches = (total + OPTIONS_PER_BATCH - 1) / OPTIONS_PER_BATCH;
             tracing::info!("Using prompt caching with {} options per batch ({} batches)", OPTIONS_PER_BATCH, num_batches);
 
-            // Process in batches of OPTIONS_PER_BATCH
-            for (batch_idx, chunk) in extracted_flags.chunks(OPTIONS_PER_BATCH).enumerate() {
-                let query = prompt::batched_option_query(chunk);
+            // Prepare all batches upfront
+            let batches: Vec<(usize, Vec<Vec<String>>)> = extracted_flags
+                .chunks(OPTIONS_PER_BATCH)
+                .enumerate()
+                .map(|(idx, chunk)| (idx, chunk.to_vec()))
+                .collect();
 
-                // Show which batch is being processed
-                eprint!("\rProcessing options: {}/{} (batch {}/{})    ",
-                    detailed_options.len(), total, batch_idx + 1, num_batches);
+            // Process batches in parallel (MAX_CONCURRENT_REQUESTS at a time)
+            let mut completed_batches = 0;
+            for batch_chunk in batches.chunks(MAX_CONCURRENT_REQUESTS) {
+                let futures: Vec<_> = batch_chunk
+                    .iter()
+                    .map(|(batch_idx, chunk)| {
+                        let query = prompt::batched_option_query(chunk);
+                        let max_tokens = (chunk.len() * 450) as u32;
+                        let detail_system = detail_system.clone();
+                        let cached_context = cached_context.clone();
+                        let batch_idx = *batch_idx;
+
+                        async move {
+                            let batch_json = self.call_api_cached(&detail_system, &cached_context, &query, max_tokens).await?;
+
+                            // Parse as array of CommandOption
+                            let batch_options: Vec<CommandOption> = serde_json::from_str(&batch_json).map_err(|e| {
+                                tracing::warn!("Failed to parse batch {}: {}", batch_idx, e);
+
+                                // Save failed response to debug file
+                                if let Some(proj_dirs) = directories::ProjectDirs::from("", "", "quocli") {
+                                    let debug_dir = proj_dirs.data_dir().join("debug");
+                                    if std::fs::create_dir_all(&debug_dir).is_ok() {
+                                        let debug_file = debug_dir.join(format!("failed_batch_{}.json", batch_idx));
+                                        if let Err(write_err) = std::fs::write(&debug_file, &batch_json) {
+                                            tracing::warn!("Failed to save debug file: {}", write_err);
+                                        } else {
+                                            tracing::info!("Saved failed response to {:?}", debug_file);
+                                            eprintln!("\nDebug: Failed JSON saved to {:?}", debug_file);
+                                        }
+                                    }
+                                }
+
+                                QuocliError::Llm(format!("Failed to parse batch {}: {}", batch_idx, e))
+                            })?;
+
+                            Ok::<(usize, Vec<CommandOption>), QuocliError>((batch_idx, batch_options))
+                        }
+                    })
+                    .collect();
+
+                // Show progress before starting this chunk
+                eprint!("\rProcessing options: {}/{} (batches {}-{}/{})    ",
+                    detailed_options.len(), total,
+                    completed_batches + 1,
+                    (completed_batches + batch_chunk.len()).min(num_batches),
+                    num_batches);
                 io::stderr().flush().ok();
 
-                // Calculate max tokens based on batch size (about 450 tokens per option for safety)
-                let max_tokens = (chunk.len() * 450) as u32;
+                let mut batch_results = future::try_join_all(futures).await?;
 
-                let batch_json = self.call_api_cached(&detail_system, &cached_context, &query, max_tokens).await?;
+                // Sort by batch index to maintain order
+                batch_results.sort_by_key(|(idx, _)| *idx);
 
-                // Parse as array of CommandOption
-                let batch_options: Vec<CommandOption> = serde_json::from_str(&batch_json).map_err(|e| {
-                    tracing::warn!("Failed to parse batched options: {}", e);
+                for (_, options) in batch_results {
+                    detailed_options.extend(options);
+                }
 
-                    // Save failed response to debug file
-                    if let Some(proj_dirs) = directories::ProjectDirs::from("", "", "quocli") {
-                        let debug_dir = proj_dirs.data_dir().join("debug");
-                        if std::fs::create_dir_all(&debug_dir).is_ok() {
-                            let debug_file = debug_dir.join("failed_response.json");
-                            if let Err(write_err) = std::fs::write(&debug_file, &batch_json) {
-                                tracing::warn!("Failed to save debug file: {}", write_err);
-                            } else {
-                                tracing::info!("Saved failed response to {:?}", debug_file);
-                                eprintln!("\nDebug: Failed JSON saved to {:?}", debug_file);
-                            }
-                        }
-                    }
-
-                    QuocliError::Llm(format!("Failed to parse batched options: {}", e))
-                })?;
-
-                detailed_options.extend(batch_options);
+                completed_batches += batch_chunk.len();
             }
 
             // Show final progress for batched mode
