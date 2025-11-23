@@ -334,13 +334,34 @@ impl FormState {
     pub fn cycle_enum(&mut self) {
         if let Some(field) = self.current_field_mut() {
             if field.field_type == ArgumentType::Enum && !field.enum_values.is_empty() {
-                let current_idx = field
-                    .enum_values
-                    .iter()
-                    .position(|v| v == &field.value)
-                    .unwrap_or(0);
-                let next_idx = (current_idx + 1) % field.enum_values.len();
-                field.value = field.enum_values[next_idx].clone();
+                if field.required {
+                    // Required enums: cycle through values only
+                    let current_idx = field
+                        .enum_values
+                        .iter()
+                        .position(|v| v == &field.value)
+                        .unwrap_or(0);
+                    let next_idx = (current_idx + 1) % field.enum_values.len();
+                    field.value = field.enum_values[next_idx].clone();
+                } else {
+                    // Optional enums: include empty state in cycle
+                    if field.value.is_empty() {
+                        // Empty -> first value
+                        field.value = field.enum_values[0].clone();
+                    } else if let Some(current_idx) =
+                        field.enum_values.iter().position(|v| v == &field.value)
+                    {
+                        // Current value found -> next value or empty
+                        if current_idx + 1 < field.enum_values.len() {
+                            field.value = field.enum_values[current_idx + 1].clone();
+                        } else {
+                            field.value = String::new();
+                        }
+                    } else {
+                        // Value not in enum_values -> reset to empty
+                        field.value = String::new();
+                    }
+                }
             }
         }
     }
