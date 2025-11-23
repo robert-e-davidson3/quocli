@@ -55,3 +55,27 @@ Respond with only JSON, no other text."#,
         flags_str
     )
 }
+
+/// User prompt for single positional argument extraction (used with cached context)
+pub fn single_positional_arg_query(arg_name: &str) -> String {
+    format!(r#"Extract detailed information for this positional argument: {arg_name}
+
+Return a JSON object with this structure:
+{{
+  "name": "{arg_name}",
+  "description": "Detailed description of what this argument represents",
+  "argument_type": "string",
+  "required": true,
+  "sensitive": false,
+  "default": null
+}}
+
+Guidelines:
+- description: Full description from the documentation above explaining what this argument is for
+- argument_type: "bool", "string", "int", "float", "path", or "enum"
+- required: true if this argument must be provided, false if optional
+- sensitive: true if this typically contains secrets/tokens/passwords
+- default: default value if specified in documentation
+
+Respond with only JSON, no other text."#)
+}

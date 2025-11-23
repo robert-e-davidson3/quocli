@@ -630,13 +630,75 @@ JSON only, no other text."#,
         eprintln!("\rProcessing options: {}/{}    ", total, total);
         tracing::info!("Successfully processed {} options", detailed_options.len());
 
+        // === PASS 3: Get details for each positional argument ===
+        let pos_total = extracted_positional.len();
+        let mut detailed_positional: Vec<PositionalArg> = Vec::with_capacity(pos_total);
+
+        if pos_total > 0 {
+            tracing::info!("Processing {} positional arguments", pos_total);
+            eprint!("\rProcessing positional args: 0/{}    ", pos_total);
+            io::stderr().flush().ok();
+
+            // Helper to create positional arg extraction future
+            let make_positional_future = |arg_name: String, detail_system: String, cached_context: String| -> BoxFuture<'_, Result<PositionalArg, QuocliError>> {
+                Box::pin(async move {
+                    let query = prompt::single_positional_arg_query(&arg_name);
+                    let detail_json = self.call_api_cached(
+                        &detail_system,
+                        &cached_context,
+                        &query,
+                        1024,
+                        Some("claude-haiku-4-5-20251001"),
+                    ).await?;
+
+                    let detailed: PositionalArg = serde_json::from_str(&detail_json).map_err(|e| {
+                        tracing::warn!("Failed to parse positional arg details for {}: {}", arg_name, e);
+                        QuocliError::Llm(format!("Failed to parse positional arg detail: {}", e))
+                    })?;
+
+                    Ok(detailed)
+                })
+            };
+
+            // Process positional args with streaming concurrency
+            let arg_names: Vec<_> = extracted_positional.iter().map(|a| a.name.clone()).collect();
+            let mut arg_iter = arg_names.into_iter();
+            let mut pos_in_flight: FuturesUnordered<BoxFuture<'_, Result<PositionalArg, QuocliError>>> = FuturesUnordered::new();
+
+            // Start initial batch of concurrent requests
+            for _ in 0..MAX_CONCURRENT_REQUESTS {
+                if let Some(arg_name) = arg_iter.next() {
+                    pos_in_flight.push(make_positional_future(arg_name, detail_system.clone(), cached_context.clone()));
+                }
+            }
+
+            // Process results as they complete, starting new requests immediately
+            while let Some(result) = pos_in_flight.next().await {
+                let detailed = result?;
+                detailed_positional.push(detailed);
+
+                // Show progress
+                eprint!("\rProcessing positional args: {}/{}    ", detailed_positional.len(), pos_total);
+                io::stderr().flush().ok();
+
+                // Start next request if there are more args
+                if let Some(arg_name) = arg_iter.next() {
+                    pos_in_flight.push(make_positional_future(arg_name, detail_system.clone(), cached_context.clone()));
+                }
+            }
+
+            // Clear the progress line
+            eprintln!("\rProcessing positional args: {}/{}    ", pos_total, pos_total);
+            tracing::info!("Successfully processed {} positional arguments", detailed_positional.len());
+        }
+
         // === Assemble final spec ===
         let spec = CommandSpec {
             command: command.to_string(),
             version_hash: help_hash.to_string(),
             description: metadata.description,
             options: detailed_options,
-            positional_args: extracted_positional,
+            positional_args: detailed_positional,
             subcommands: vec![],
             danger_level: metadata.danger_level,
             examples: vec![],
