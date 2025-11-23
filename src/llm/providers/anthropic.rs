@@ -20,6 +20,25 @@ impl AnthropicClient {
     }
 }
 
+/// Strip markdown code blocks from LLM response
+fn strip_markdown_code_blocks(text: &str) -> String {
+    let text = text.trim();
+
+    // Check for ```json or ``` at start
+    if text.starts_with("```") {
+        // Find the end of the first line (after ```json or ```)
+        let start = text.find('\n').map(|i| i + 1).unwrap_or(0);
+        // Find the closing ```
+        let end = text.rfind("```").unwrap_or(text.len());
+
+        if start < end {
+            return text[start..end].trim().to_string();
+        }
+    }
+
+    text.to_string()
+}
+
 #[derive(Serialize)]
 struct AnthropicRequest {
     model: String,
@@ -93,9 +112,12 @@ impl LlmClient for AnthropicClient {
             .map(|c| c.text.clone())
             .ok_or_else(|| QuocliError::Llm("Empty response from API".to_string()))?;
 
+        // Strip markdown code blocks if present
+        let json_text = strip_markdown_code_blocks(&text);
+
         // Parse the JSON response
-        let spec: CommandSpec = serde_json::from_str(&text).map_err(|e| {
-            QuocliError::Llm(format!("Failed to parse spec JSON: {}. Response: {}", e, text))
+        let spec: CommandSpec = serde_json::from_str(&json_text).map_err(|e| {
+            QuocliError::Llm(format!("Failed to parse spec JSON: {}. Response: {}", e, json_text))
         })?;
 
         Ok(spec)
