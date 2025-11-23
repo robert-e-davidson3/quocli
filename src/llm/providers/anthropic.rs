@@ -403,6 +403,9 @@ JSON only, no other text."#,
             detailed_options.push(detailed);
             eprint!("\rProcessing options: 1/{}    ", total);
             io::stderr().flush().ok();
+
+            // Small delay to ensure cache is ready
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
         }
 
         // Process remaining options with full concurrency (cache is now warm)
