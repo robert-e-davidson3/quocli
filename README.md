@@ -55,7 +55,7 @@ Configuration file: `~/.config/quocli/config.toml`
 [llm]
 provider = "anthropic"
 api_key_env = "ANTHROPIC_API_KEY"
-model = "claude-sonnet-4-5-20250514"
+model = "claude-sonnet-4-5-20250929"
 
 [cache]
 path = "~/.local/share/quocli/cache.db"

@@ -52,7 +52,7 @@ fn default_api_key_env() -> String {
 }
 
 fn default_model() -> String {
-    "claude-sonnet-4-5-20250514".to_string()
+    "claude-sonnet-4-5-20250929".to_string()
 }
 
 fn default_fallback_model() -> String {
