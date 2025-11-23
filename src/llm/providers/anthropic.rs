@@ -393,10 +393,26 @@ JSON only, no other text."#,
                     let cached_context = cached_context.clone();
 
                     async move {
-                        let detail_json = self.call_api_cached(&detail_system, &cached_context, &query, 512).await?;
+                        let detail_json = self.call_api_cached(&detail_system, &cached_context, &query, 1024).await?;
 
                         let detailed: CommandOption = serde_json::from_str(&detail_json).map_err(|e| {
                             tracing::warn!("Failed to parse option details for {:?}: {}", flags, e);
+
+                            // Save failed response to debug file
+                            if let Some(proj_dirs) = directories::ProjectDirs::from("", "", "quocli") {
+                                let debug_dir = proj_dirs.data_dir().join("debug");
+                                if std::fs::create_dir_all(&debug_dir).is_ok() {
+                                    let flag_name = flags.first().map(|f| f.trim_start_matches('-')).unwrap_or("unknown");
+                                    let debug_file = debug_dir.join(format!("failed_{}.json", flag_name));
+                                    if let Err(write_err) = std::fs::write(&debug_file, &detail_json) {
+                                        tracing::warn!("Failed to save debug file: {}", write_err);
+                                    } else {
+                                        tracing::info!("Saved failed response to {:?}", debug_file);
+                                        eprintln!("\nDebug: Failed JSON saved to {:?}", debug_file);
+                                    }
+                                }
+                            }
+
                             QuocliError::Llm(format!("Failed to parse option detail: {}", e))
                         })?;
 
