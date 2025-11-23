@@ -39,6 +39,16 @@ pub fn build_command(spec: &CommandSpec, values: &HashMap<String, String>) -> St
                         parts.push(primary.to_string());
                     }
                 }
+                ArgumentType::Path => {
+                    parts.push(primary.to_string());
+                    // Expand tilde for path arguments
+                    let expanded = shellexpand::tilde(value).to_string();
+                    if expanded.contains(' ') {
+                        parts.push(format!("\"{}\"", expanded));
+                    } else {
+                        parts.push(expanded);
+                    }
+                }
                 _ => {
                     parts.push(primary.to_string());
                     // Quote values with spaces
@@ -52,12 +62,24 @@ pub fn build_command(spec: &CommandSpec, values: &HashMap<String, String>) -> St
         }
     }
 
-    // Add positional arguments at the end
-    for (_, value) in positional_values {
-        if value.contains(' ') {
-            parts.push(format!("\"{}\"", value));
+    // Add positional arguments at the end (also expand tilde for paths)
+    for (key, value) in positional_values {
+        // Check if this positional arg is a path type
+        let is_path = spec.positional_args.iter()
+            .find(|a| format!("_pos_{}", a.name) == key)
+            .map(|a| a.argument_type == ArgumentType::Path)
+            .unwrap_or(false);
+
+        let final_value = if is_path {
+            shellexpand::tilde(&value).to_string()
         } else {
-            parts.push(value);
+            value
+        };
+
+        if final_value.contains(' ') {
+            parts.push(format!("\"{}\"", final_value));
+        } else {
+            parts.push(final_value);
         }
     }
 
