@@ -371,12 +371,17 @@ JSON only, no other text."#,
         let total = extracted_flags.len();
         let mut detailed_options: Vec<CommandOption> = Vec::with_capacity(total);
 
-        // Show initial progress
-        eprint!("\rProcessing options: 0/{}    ", total);
-        io::stderr().flush().ok();
-
         // Use batching with caching if we have more options than the batch size
         let use_caching = total > OPTIONS_PER_BATCH;
+
+        // Show initial progress (after metadata call completes)
+        if use_caching {
+            let num_batches = (total + OPTIONS_PER_BATCH - 1) / OPTIONS_PER_BATCH;
+            eprint!("\rProcessing options: 0/{} (batch 0/{})    ", total, num_batches);
+        } else {
+            eprint!("\rProcessing options: 0/{}    ", total);
+        }
+        io::stderr().flush().ok();
 
         if use_caching {
             // Build cached context once
@@ -387,29 +392,51 @@ JSON only, no other text."#,
             };
             let cached_context = prompt::build_cached_context(&full_command, help_text, manpage_opt);
 
-            tracing::info!("Using prompt caching with {} options per batch", OPTIONS_PER_BATCH);
+            let num_batches = (total + OPTIONS_PER_BATCH - 1) / OPTIONS_PER_BATCH;
+            tracing::info!("Using prompt caching with {} options per batch ({} batches)", OPTIONS_PER_BATCH, num_batches);
 
             // Process in batches of OPTIONS_PER_BATCH
-            for chunk in extracted_flags.chunks(OPTIONS_PER_BATCH) {
+            for (batch_idx, chunk) in extracted_flags.chunks(OPTIONS_PER_BATCH).enumerate() {
                 let query = prompt::batched_option_query(chunk);
 
-                // Calculate max tokens based on batch size (about 200 tokens per option)
-                let max_tokens = (chunk.len() * 250) as u32;
+                // Show which batch is being processed
+                eprint!("\rProcessing options: {}/{} (batch {}/{})    ",
+                    detailed_options.len(), total, batch_idx + 1, num_batches);
+                io::stderr().flush().ok();
+
+                // Calculate max tokens based on batch size (about 450 tokens per option for safety)
+                let max_tokens = (chunk.len() * 450) as u32;
 
                 let batch_json = self.call_api_cached(&detail_system, &cached_context, &query, max_tokens).await?;
 
                 // Parse as array of CommandOption
                 let batch_options: Vec<CommandOption> = serde_json::from_str(&batch_json).map_err(|e| {
                     tracing::warn!("Failed to parse batched options: {}", e);
+
+                    // Save failed response to debug file
+                    if let Some(proj_dirs) = directories::ProjectDirs::from("", "", "quocli") {
+                        let debug_dir = proj_dirs.data_dir().join("debug");
+                        if std::fs::create_dir_all(&debug_dir).is_ok() {
+                            let debug_file = debug_dir.join("failed_response.json");
+                            if let Err(write_err) = std::fs::write(&debug_file, &batch_json) {
+                                tracing::warn!("Failed to save debug file: {}", write_err);
+                            } else {
+                                tracing::info!("Saved failed response to {:?}", debug_file);
+                                eprintln!("\nDebug: Failed JSON saved to {:?}", debug_file);
+                            }
+                        }
+                    }
+
                     QuocliError::Llm(format!("Failed to parse batched options: {}", e))
                 })?;
 
                 detailed_options.extend(batch_options);
-
-                // Show progress
-                eprint!("\rProcessing options: {}/{}    ", detailed_options.len(), total);
-                io::stderr().flush().ok();
             }
+
+            // Show final progress for batched mode
+            eprint!("\rProcessing options: {}/{} (batch {}/{})    ",
+                detailed_options.len(), total, num_batches, num_batches);
+            io::stderr().flush().ok();
         } else {
             // Use simple approach for small number of options (no caching overhead)
             let manpage_opt = if has_manpage {
