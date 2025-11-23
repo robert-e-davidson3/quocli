@@ -368,10 +368,6 @@ JSON only, no other text."#,
         let total = extracted_flags.len();
         let mut detailed_options: Vec<CommandOption> = Vec::with_capacity(total);
 
-        // Show initial progress (after metadata call completes)
-        eprint!("\rProcessing options: 0/{}    ", total);
-        io::stderr().flush().ok();
-
         // Build cached context with full help text and manpage
         let manpage_opt = if has_manpage {
             Some(docs.manpage_text.as_str())
@@ -381,6 +377,10 @@ JSON only, no other text."#,
         let cached_context = prompt::build_cached_context(&full_command, help_text, manpage_opt);
 
         tracing::info!("Using prompt caching for {} options ({} concurrent)", total, MAX_CONCURRENT_REQUESTS);
+
+        // Show initial progress (after metadata call and context setup)
+        eprint!("\rProcessing options: 0/{}    ", total);
+        io::stderr().flush().ok();
 
         // Process each option individually using cached context, in parallel
         for chunk in extracted_flags.chunks(MAX_CONCURRENT_REQUESTS) {
