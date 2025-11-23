@@ -1,4 +1,5 @@
 use crate::parser::{ArgumentType, CommandOption, PositionalArg};
+use crate::shell::get_env_suggestions;
 use std::collections::HashMap;
 
 /// Tab categories for organizing options
@@ -88,6 +89,10 @@ pub struct FormState {
     // Tab state
     pub current_tab: OptionTab,
     pub frequent_indices: Vec<usize>, // indices of fields that have cached values
+    // Env var suggestion state
+    pub showing_suggestions: bool,
+    pub env_suggestions: Vec<(String, String)>, // (name, value)
+    pub selected_suggestion: usize,
 }
 
 impl FormState {
@@ -104,6 +109,9 @@ impl FormState {
             include_description: false,
             current_tab: OptionTab::All,
             frequent_indices: Vec::new(),
+            showing_suggestions: false,
+            env_suggestions: Vec::new(),
+            selected_suggestion: 0,
         }
     }
 
@@ -363,5 +371,86 @@ impl FormState {
                 self.frequent_indices.push(i);
             }
         }
+    }
+
+    /// Update env var suggestions based on current field value
+    pub fn update_env_suggestions(&mut self) {
+        if let Some(field) = self.current_field() {
+            // Find the last $ in the value and get the text after it
+            if let Some(dollar_pos) = field.value.rfind('$') {
+                let after_dollar = &field.value[dollar_pos + 1..];
+                // Check if we're past the $ in cursor position and it's a valid var name start
+                if self.cursor_pos > dollar_pos {
+                    // Get prefix (text after $, could be empty)
+                    let prefix = if after_dollar.contains(|c: char| !c.is_alphanumeric() && c != '_') {
+                        // There's a non-var char after the $, not in env var mode
+                        self.showing_suggestions = false;
+                        self.env_suggestions.clear();
+                        return;
+                    } else {
+                        after_dollar
+                    };
+
+                    // Get suggestions
+                    let suggestions = get_env_suggestions(prefix);
+                    if !suggestions.is_empty() {
+                        self.env_suggestions = suggestions;
+                        self.showing_suggestions = true;
+                        self.selected_suggestion = 0;
+                    } else {
+                        self.showing_suggestions = false;
+                        self.env_suggestions.clear();
+                    }
+                    return;
+                }
+            }
+        }
+
+        // Not in suggestion mode
+        self.showing_suggestions = false;
+        self.env_suggestions.clear();
+    }
+
+    /// Move to next suggestion
+    pub fn next_suggestion(&mut self) {
+        if !self.env_suggestions.is_empty() {
+            self.selected_suggestion = (self.selected_suggestion + 1) % self.env_suggestions.len();
+        }
+    }
+
+    /// Move to previous suggestion
+    pub fn prev_suggestion(&mut self) {
+        if !self.env_suggestions.is_empty() {
+            if self.selected_suggestion == 0 {
+                self.selected_suggestion = self.env_suggestions.len() - 1;
+            } else {
+                self.selected_suggestion -= 1;
+            }
+        }
+    }
+
+    /// Accept the currently selected suggestion
+    pub fn accept_suggestion(&mut self) {
+        if self.showing_suggestions && !self.env_suggestions.is_empty() {
+            let var_name = self.env_suggestions[self.selected_suggestion].0.clone();
+
+            if let Some(field) = self.current_field_mut() {
+                // Find the last $ and replace everything after it with the var name
+                if let Some(dollar_pos) = field.value.rfind('$') {
+                    field.value.truncate(dollar_pos + 1);
+                    field.value.push_str(&var_name);
+                    self.cursor_pos = field.value.len();
+                }
+            }
+
+            self.showing_suggestions = false;
+            self.env_suggestions.clear();
+        }
+    }
+
+    /// Cancel showing suggestions
+    pub fn cancel_suggestions(&mut self) {
+        self.showing_suggestions = false;
+        self.env_suggestions.clear();
     }
 }
