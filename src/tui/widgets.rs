@@ -383,6 +383,13 @@ impl FormState {
             .collect()
     }
 
+    /// Clear all field values
+    pub fn clear_all_values(&mut self) {
+        for field in &mut self.fields {
+            field.value = String::new();
+        }
+    }
+
     /// Load cached values and track frequent fields
     pub fn load_cached_values(&mut self, cached: &HashMap<String, String>) {
         self.frequent_indices.clear();
