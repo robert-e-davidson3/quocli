@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::parser::CommandSpec;
+use crate::parser::{CommandSpec, HelpDocumentation};
 use crate::QuocliError;
 
 use super::providers::anthropic::AnthropicClient;
@@ -11,7 +11,7 @@ pub trait LlmClient: Send + Sync {
         &self,
         command: &str,
         subcommands: &[String],
-        help_text: &str,
+        docs: &HelpDocumentation,
         help_hash: &str,
     ) -> Result<CommandSpec, QuocliError>;
 

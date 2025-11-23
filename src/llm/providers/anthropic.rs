@@ -1,11 +1,12 @@
 use crate::llm::client::{async_trait, LlmClient};
 use crate::llm::prompt;
-use crate::parser::{CommandOption, CommandSpec, DangerLevel};
+use crate::parser::{CommandOption, CommandSpec, DangerLevel, HelpDocumentation};
 use crate::QuocliError;
 use futures::future;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::io::{self, Write};
 
 /// Maximum concurrent API requests to avoid rate limiting
 const MAX_CONCURRENT_REQUESTS: usize = 10;
@@ -25,7 +26,7 @@ impl AnthropicClient {
         }
     }
 
-    /// Make an API call and return the text response
+    /// Make an API call and return the text response with retry logic
     async fn call_api(&self, system: &str, user: &str, max_tokens: u32) -> Result<String, QuocliError> {
         let request = AnthropicRequest {
             model: self.model.clone(),
@@ -37,34 +38,61 @@ impl AnthropicClient {
             }],
         };
 
-        let response = self
-            .client
-            .post("https://api.anthropic.com/v1/messages")
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
-            .json(&request)
-            .send()
-            .await?;
+        let mut last_error = None;
+        let retry_delays = [2000, 4000, 8000, 16000]; // milliseconds
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_text = response.text().await.unwrap_or_default();
-            return Err(QuocliError::Llm(format!(
-                "API request failed with status {}: {}",
-                status, error_text
-            )));
+        for attempt in 0..=retry_delays.len() {
+            let result = self
+                .client
+                .post("https://api.anthropic.com/v1/messages")
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", "2023-06-01")
+                .header("content-type", "application/json")
+                .json(&request)
+                .send()
+                .await;
+
+            match result {
+                Ok(response) => {
+                    if !response.status().is_success() {
+                        let status = response.status();
+                        let error_text = response.text().await.unwrap_or_default();
+                        return Err(QuocliError::Llm(format!(
+                            "API request failed with status {}: {}",
+                            status, error_text
+                        )));
+                    }
+
+                    let api_response: AnthropicResponse = response.json().await?;
+
+                    let text = api_response
+                        .content
+                        .first()
+                        .map(|c| c.text.clone())
+                        .ok_or_else(|| QuocliError::Llm("Empty response from API".to_string()))?;
+
+                    return Ok(strip_markdown_code_blocks(&text));
+                }
+                Err(e) => {
+                    // Only retry on connection/network errors
+                    if e.is_connect() || e.is_request() {
+                        last_error = Some(e);
+                        if attempt < retry_delays.len() {
+                            let delay = retry_delays[attempt];
+                            tracing::warn!("Connection error, retrying in {}ms (attempt {}/{})",
+                                delay, attempt + 1, retry_delays.len());
+                            tokio::time::sleep(tokio::time::Duration::from_millis(delay as u64)).await;
+                            continue;
+                        }
+                    } else {
+                        return Err(e.into());
+                    }
+                }
+            }
         }
 
-        let api_response: AnthropicResponse = response.json().await?;
-
-        let text = api_response
-            .content
-            .first()
-            .map(|c| c.text.clone())
-            .ok_or_else(|| QuocliError::Llm("Empty response from API".to_string()))?;
-
-        Ok(strip_markdown_code_blocks(&text))
+        Err(last_error.map(|e| e.into()).unwrap_or_else(||
+            QuocliError::Llm("Max retries exceeded".to_string())))
     }
 }
 
@@ -163,7 +191,7 @@ impl LlmClient for AnthropicClient {
         &self,
         command: &str,
         subcommands: &[String],
-        help_text: &str,
+        docs: &HelpDocumentation,
         help_hash: &str,
     ) -> Result<CommandSpec, QuocliError> {
         let full_command = if subcommands.is_empty() {
@@ -171,6 +199,13 @@ impl LlmClient for AnthropicClient {
         } else {
             format!("{} {}", command, subcommands.join(" "))
         };
+
+        let help_text = &docs.help_text;
+        let has_manpage = !docs.manpage_text.is_empty();
+        if has_manpage {
+            tracing::info!("Manpage available ({} chars), will use for enhanced details",
+                docs.manpage_text.len());
+        }
 
         // === PASS 1: Extract flags locally using regex (instant, no token limits) ===
         tracing::info!("Pass 1: Extracting flags from help text for {}", full_command);
@@ -217,17 +252,24 @@ JSON only, no other text."#,
             extracted_flags.len(), MAX_CONCURRENT_REQUESTS);
 
         // Prepare all prompts upfront
+        let manpage_opt = if has_manpage {
+            Some(docs.manpage_text.as_str())
+        } else {
+            None
+        };
+
         let prompts: Vec<(usize, Vec<String>, String)> = extracted_flags
             .iter()
             .enumerate()
             .map(|(i, flags)| {
-                let detail_user = prompt::option_detail_user_prompt(&full_command, flags, help_text);
+                let detail_user = prompt::option_detail_user_prompt(&full_command, flags, help_text, manpage_opt);
                 (i, flags.clone(), detail_user)
             })
             .collect();
 
         // Process in batches to limit concurrency
         let mut detailed_options: Vec<CommandOption> = Vec::with_capacity(prompts.len());
+        let total = prompts.len();
 
         for chunk in prompts.chunks(MAX_CONCURRENT_REQUESTS) {
             let futures: Vec<_> = chunk
@@ -256,9 +298,13 @@ JSON only, no other text."#,
             let batch_results = future::try_join_all(futures).await?;
             detailed_options.extend(batch_results);
 
-            tracing::debug!("Completed batch, {} options processed so far", detailed_options.len());
+            // Show progress
+            eprint!("\rProcessing options: {}/{}    ", detailed_options.len(), total);
+            io::stderr().flush().ok();
         }
 
+        // Clear the progress line
+        eprintln!("\rProcessing options: {}/{}    ", total, total);
         tracing::info!("Successfully processed {} options", detailed_options.len());
 
         // === Assemble final spec ===

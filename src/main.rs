@@ -139,9 +139,9 @@ async fn get_or_generate_spec(
         format!("{}:{}", command_name, subcommands.join(":"))
     };
 
-    // Get help text
-    let help_text = parser::get_help_text(command_name, subcommands)?;
-    let help_hash = parser::hash_help_text(&help_text);
+    // Get help documentation (help text + manpage)
+    let docs = parser::get_help_documentation(command_name, subcommands)?;
+    let help_hash = parser::hash_help_text(&docs.combined_text());
 
     // Check cache
     if !force_refresh {
@@ -159,7 +159,7 @@ async fn get_or_generate_spec(
     tracing::info!("Generating spec for: {}", full_command);
     let llm_client = llm::create_client(config)?;
     let spec = llm_client
-        .generate_spec(command_name, subcommands, &help_text, &help_hash)
+        .generate_spec(command_name, subcommands, &docs, &help_hash)
         .await?;
 
     // Cache the spec

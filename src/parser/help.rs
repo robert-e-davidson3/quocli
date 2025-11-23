@@ -2,8 +2,43 @@ use crate::QuocliError;
 use sha2::{Digest, Sha256};
 use std::process::Command;
 
+/// Combined help documentation for a command
+pub struct HelpDocumentation {
+    /// Help text from --help or similar
+    pub help_text: String,
+    /// Man page text if available (may be empty)
+    pub manpage_text: String,
+}
+
+impl HelpDocumentation {
+    /// Get the combined text for hashing (to detect changes)
+    pub fn combined_text(&self) -> String {
+        if self.manpage_text.is_empty() {
+            self.help_text.clone()
+        } else {
+            format!("{}\n\n--- MANPAGE ---\n\n{}", self.help_text, self.manpage_text)
+        }
+    }
+}
+
+/// Get help text and manpage for a command
+pub fn get_help_documentation(command: &str, subcommands: &[String]) -> Result<HelpDocumentation, QuocliError> {
+    let help_text = get_help_text_only(command, subcommands)?;
+    let manpage_text = get_manpage_text(command, subcommands).unwrap_or_default();
+
+    Ok(HelpDocumentation {
+        help_text,
+        manpage_text,
+    })
+}
+
 /// Get help text for a command, trying various methods
 pub fn get_help_text(command: &str, subcommands: &[String]) -> Result<String, QuocliError> {
+    get_help_text_only(command, subcommands)
+}
+
+/// Get help text only (no manpage fallback)
+fn get_help_text_only(command: &str, subcommands: &[String]) -> Result<String, QuocliError> {
     let mut args: Vec<&str> = subcommands.iter().map(|s| s.as_str()).collect();
 
     // Try extended help variants first (for commands like curl that have truncated default help)
@@ -50,20 +85,30 @@ pub fn get_help_text(command: &str, subcommands: &[String]) -> Result<String, Qu
         }
     }
 
-    // Try man page
+    Err(QuocliError::NoHelpText(command.to_string()))
+}
+
+/// Get manpage text for a command
+fn get_manpage_text(command: &str, subcommands: &[String]) -> Result<String, QuocliError> {
     let man_command = if subcommands.is_empty() {
         command.to_string()
     } else {
         format!("{}-{}", command, subcommands.join("-"))
     };
 
-    if let Ok(output) = try_command("man", &[&man_command]) {
-        if !output.is_empty() && output.len() > 50 {
-            return Ok(output);
-        }
-    }
+    // Use col -b to strip formatting control characters from man output
+    let output = Command::new("sh")
+        .args(["-c", &format!("man {} 2>/dev/null | col -b", man_command)])
+        .output()
+        .map_err(|_| QuocliError::CommandNotFound("man".to_string()))?;
 
-    Err(QuocliError::NoHelpText(command.to_string()))
+    let text = String::from_utf8_lossy(&output.stdout).to_string();
+
+    if text.len() > 100 {
+        Ok(text)
+    } else {
+        Err(QuocliError::NoHelpText(format!("man {}", man_command)))
+    }
 }
 
 /// Try to run a command and get its output
