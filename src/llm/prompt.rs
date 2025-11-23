@@ -1,25 +1,3 @@
-/// Generate context for chat interactions
-#[allow(dead_code)]
-pub fn chat_context(command: &str, spec_summary: &str, current_values: &str) -> String {
-    format!(r#"You are helping a user construct a command-line invocation.
-
-Current command: {command}
-
-Available options:
-{spec_summary}
-
-Current form values:
-{current_values}
-
-Help the user understand the command options and suggest appropriate values. You can:
-- Explain what specific flags do
-- Suggest flag combinations for common tasks
-- Warn about potentially dangerous options
-- Help fill in the form based on the user's natural language request
-
-Keep responses concise and focused on the CLI command at hand."#)
-}
-
 // === Two-pass batching prompts ===
 
 /// First pass: identify all options (compact format)

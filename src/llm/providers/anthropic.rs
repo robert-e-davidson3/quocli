@@ -1,6 +1,6 @@
 use crate::llm::client::{async_trait, LlmClient};
 use crate::llm::prompt;
-use crate::parser::{ArgumentType, CommandOption, CommandSpec, DangerLevel, PositionalArg};
+use crate::parser::{CommandOption, CommandSpec, DangerLevel, PositionalArg};
 use crate::QuocliError;
 use serde::{Deserialize, Serialize};
 
@@ -77,14 +77,11 @@ struct DiscoveryResponse {
 #[derive(Deserialize)]
 struct CompactOption {
     flags: Vec<String>,
-    argument_type: ArgumentType,
-    argument_name: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct CompactPositional {
     name: String,
-    argument_type: ArgumentType,
 }
 
 /// Strip markdown code blocks from LLM response
