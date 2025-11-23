@@ -2,9 +2,13 @@ use crate::llm::client::{async_trait, LlmClient};
 use crate::llm::prompt;
 use crate::parser::{CommandOption, CommandSpec, DangerLevel};
 use crate::QuocliError;
+use futures::future;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+
+/// Maximum concurrent API requests to avoid rate limiting
+const MAX_CONCURRENT_REQUESTS: usize = 10;
 
 pub struct AnthropicClient {
     api_key: String,
@@ -206,25 +210,56 @@ JSON only, no other text."#,
 
         tracing::info!("Got metadata: {} options to process", extracted_flags.len());
 
-        // === PASS 2: Get details for each option ===
+        // === PASS 2: Get details for each option (concurrent) ===
         let detail_system = prompt::option_detail_system_prompt();
-        let mut detailed_options: Vec<CommandOption> = Vec::new();
 
-        for (i, flags) in extracted_flags.iter().enumerate() {
-            tracing::info!("Pass 2: Getting details for option {}/{}: {:?}",
-                i + 1, extracted_flags.len(), flags);
+        tracing::info!("Pass 2: Getting details for {} options concurrently (max {} parallel)",
+            extracted_flags.len(), MAX_CONCURRENT_REQUESTS);
 
-            let detail_user = prompt::option_detail_user_prompt(&full_command, flags, help_text);
-            let detail_json = self.call_api(&detail_system, &detail_user, 1024).await?;
+        // Prepare all prompts upfront
+        let prompts: Vec<(usize, Vec<String>, String)> = extracted_flags
+            .iter()
+            .enumerate()
+            .map(|(i, flags)| {
+                let detail_user = prompt::option_detail_user_prompt(&full_command, flags, help_text);
+                (i, flags.clone(), detail_user)
+            })
+            .collect();
 
-            let detailed: CommandOption = serde_json::from_str(&detail_json).map_err(|e| {
-                // If we fail to parse details, create a minimal option from discovery data
-                tracing::warn!("Failed to parse option details: {}. Using minimal data.", e);
-                return QuocliError::Llm(format!("Failed to parse option detail: {}", e));
-            })?;
+        // Process in batches to limit concurrency
+        let mut detailed_options: Vec<CommandOption> = Vec::with_capacity(prompts.len());
 
-            detailed_options.push(detailed);
+        for chunk in prompts.chunks(MAX_CONCURRENT_REQUESTS) {
+            let futures: Vec<_> = chunk
+                .iter()
+                .map(|(i, flags, detail_user)| {
+                    let i = *i;
+                    let flags = flags.clone();
+                    let detail_user = detail_user.clone();
+                    let detail_system = detail_system.clone();
+
+                    async move {
+                        tracing::debug!("Getting details for option {}: {:?}", i + 1, flags);
+
+                        let detail_json = self.call_api(&detail_system, &detail_user, 1024).await?;
+
+                        let detailed: CommandOption = serde_json::from_str(&detail_json).map_err(|e| {
+                            tracing::warn!("Failed to parse option details for {:?}: {}", flags, e);
+                            QuocliError::Llm(format!("Failed to parse option detail: {}", e))
+                        })?;
+
+                        Ok::<CommandOption, QuocliError>(detailed)
+                    }
+                })
+                .collect();
+
+            let batch_results = future::try_join_all(futures).await?;
+            detailed_options.extend(batch_results);
+
+            tracing::debug!("Completed batch, {} options processed so far", detailed_options.len());
         }
+
+        tracing::info!("Successfully processed {} options", detailed_options.len());
 
         // === Assemble final spec ===
         let spec = CommandSpec {
