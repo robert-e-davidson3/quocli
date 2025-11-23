@@ -28,12 +28,15 @@ fn strip_markdown_code_blocks(text: &str) -> String {
     if text.starts_with("```") {
         // Find the end of the first line (after ```json or ```)
         let start = text.find('\n').map(|i| i + 1).unwrap_or(0);
-        // Find the closing ```
-        let end = text.rfind("```").unwrap_or(text.len());
 
-        if start < end {
-            return text[start..end].trim().to_string();
-        }
+        // Find the closing ``` (search from after the opening)
+        let end = if start < text.len() {
+            text[start..].rfind("```").map(|i| start + i).unwrap_or(text.len())
+        } else {
+            text.len()
+        };
+
+        return text[start..end].trim().to_string();
     }
 
     text.to_string()
