@@ -439,23 +439,17 @@ fn suggestion_rect(width: u16, height: u16, r: Rect) -> Rect {
 
 fn build_preview(spec: &CommandSpec, state: &FormState) -> String {
     let mut parts = vec![spec.command.clone()];
+    let mut positional_parts: Vec<String> = Vec::new();
 
+    // Process fields in two passes: flags first, then positionals
+    // This matches the order in executor::build_command
+
+    // First pass: flags (non-positional)
     for field in &state.fields {
-        if field.value.is_empty() {
+        if field.value.is_empty() || field.id.starts_with("_pos_") {
             continue;
         }
 
-        // Handle positional arguments
-        if field.id.starts_with("_pos_") {
-            if field.sensitive {
-                parts.push("***".to_string());
-            } else {
-                parts.push(field.value.clone());
-            }
-            continue;
-        }
-
-        // Handle flags
         match field.field_type {
             ArgumentType::Bool => {
                 if field.value == "true" {
@@ -464,14 +458,36 @@ fn build_preview(spec: &CommandSpec, state: &FormState) -> String {
             }
             _ => {
                 parts.push(field.id.clone());
-                if field.sensitive {
-                    parts.push("***".to_string());
+                let display_value = if field.sensitive {
+                    "***".to_string()
+                } else if field.value.contains(' ') {
+                    format!("\"{}\"", field.value)
                 } else {
-                    parts.push(field.value.clone());
-                }
+                    field.value.clone()
+                };
+                parts.push(display_value);
             }
         }
     }
+
+    // Second pass: positional arguments
+    for field in &state.fields {
+        if field.value.is_empty() || !field.id.starts_with("_pos_") {
+            continue;
+        }
+
+        let display_value = if field.sensitive {
+            "***".to_string()
+        } else if field.value.contains(' ') {
+            format!("\"{}\"", field.value)
+        } else {
+            field.value.clone()
+        };
+        positional_parts.push(display_value);
+    }
+
+    // Add positionals at the end
+    parts.extend(positional_parts);
 
     parts.join(" ")
 }
