@@ -484,13 +484,19 @@ impl LlmClient for AnthropicClient {
         let extracted_flags = extract_flags_from_help(help_text);
         tracing::info!("Extracted {} flag groups from help text", extracted_flags.len());
 
-        // Extract positional args using LLM (algorithmic approach can't handle semantic distinctions)
-        // Get first ~20 lines for usage/synopsis section
-        let usage_lines: String = help_text.lines().take(20).collect::<Vec<_>>().join("\n");
-        let positional_system = "You are a CLI command parser. Extract positional argument names from usage syntax.";
-        let positional_query = prompt::extract_positional_args_query(&usage_lines);
+        // Build cached context with full help text and manpage (used for all LLM calls)
+        let manpage_opt = if has_manpage {
+            Some(docs.manpage_text.as_str())
+        } else {
+            None
+        };
+        let cached_context = prompt::build_cached_context(&full_command, help_text, manpage_opt);
 
-        let positional_json = self.call_api(positional_system, &positional_query, 256).await?;
+        // Extract positional args using LLM with full context
+        let positional_system = "You are a CLI command parser. Extract positional argument names from usage syntax.";
+        let positional_query = prompt::extract_positional_args_query(&cached_context);
+
+        let positional_json = self.call_api(positional_system, &positional_query, 512).await?;
 
         #[derive(Deserialize)]
         struct PositionalArgsResponse {
@@ -544,14 +550,6 @@ JSON only, no other text."#,
         let detail_system = prompt::option_detail_system_prompt();
         let total = extracted_flags.len();
         let mut detailed_options: Vec<CommandOption> = Vec::with_capacity(total);
-
-        // Build cached context with full help text and manpage
-        let manpage_opt = if has_manpage {
-            Some(docs.manpage_text.as_str())
-        } else {
-            None
-        };
-        let cached_context = prompt::build_cached_context(&full_command, help_text, manpage_opt);
 
         tracing::info!("Using prompt caching for {} options ({} concurrent)", total, MAX_CONCURRENT_REQUESTS);
 
