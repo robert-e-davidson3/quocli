@@ -467,45 +467,8 @@ fn draw_form(
     let help = Paragraph::new(help_lines).style(theme.help);
     f.render_widget(help, chunks[4]);
 
-    // Show help sheet popup when requested
-    if state.showing_help {
-        let area = centered_rect(70, 60, f.area());
-        f.render_widget(Clear, area);
-
-        let help_items = vec![
-            ("↑/↓ or j/k", "Navigate fields"),
-            ("PgUp/PgDn", "Page navigation"),
-            ("Home/End", "Jump to top/bottom"),
-            ("Enter", "Edit field / Toggle bool / Cycle enum"),
-            ("Tab/Shift+Tab", "Next/previous field"),
-            ("Ctrl+↑/↓", "Scroll description"),
-            ("/", "Search by flag name"),
-            ("Ctrl+/", "Search including descriptions"),
-            ("1/2/3", "Switch to Basic/Advanced/Frequent tab"),
-            ("`", "Cycle through tabs"),
-            ("Ctrl+X", "Clear all values"),
-            ("Ctrl+E", "Execute command"),
-            ("Ctrl+P", "Preview command"),
-            ("q/Esc", "Cancel"),
-        ];
-
-        let items: Vec<ListItem> = help_items
-            .iter()
-            .map(|(key, desc)| {
-                ListItem::new(Line::from(vec![
-                    Span::styled(format!("{:15}", key), Style::default().add_modifier(Modifier::BOLD)),
-                    Span::raw(*desc),
-                ]))
-            })
-            .collect();
-
-        let list = List::new(items)
-            .block(Block::default().title("Help (press any key to close)").borders(Borders::ALL));
-        f.render_widget(list, area);
-    }
-
-    // Show description popup when field is selected (but not when showing suggestions)
-    if !state.showing_suggestions {
+    // Show description popup when field is selected (but not when showing suggestions or help)
+    if !state.showing_suggestions && !state.showing_help {
         if let Some(field) = state.current_field() {
             if !field.description.is_empty() {
                 let area = centered_rect(60, 20, f.area());
@@ -563,6 +526,43 @@ fn draw_form(
         f.render_widget(Clear, area);
         let list = List::new(items)
             .block(Block::default().title("Env Variables (Tab/Enter to select)").borders(Borders::ALL));
+        f.render_widget(list, area);
+    }
+
+    // Show help sheet popup when requested (render last to be on top)
+    if state.showing_help {
+        let area = centered_rect(70, 60, f.area());
+        f.render_widget(Clear, area);
+
+        let help_items = vec![
+            ("↑/↓ or j/k", "Navigate fields"),
+            ("PgUp/PgDn", "Page navigation"),
+            ("Home/End", "Jump to top/bottom"),
+            ("Enter", "Edit field / Toggle bool / Cycle enum"),
+            ("Tab/Shift+Tab", "Next/previous field"),
+            ("Ctrl+↑/↓", "Scroll description"),
+            ("/", "Search by flag name"),
+            ("Ctrl+/", "Search including descriptions"),
+            ("1/2/3", "Switch to Basic/Advanced/Frequent tab"),
+            ("`", "Cycle through tabs"),
+            ("Ctrl+X", "Clear all values"),
+            ("Ctrl+E", "Execute command"),
+            ("Ctrl+P", "Preview command"),
+            ("q/Esc", "Cancel"),
+        ];
+
+        let items: Vec<ListItem> = help_items
+            .iter()
+            .map(|(key, desc)| {
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!("{:15}", key), Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(*desc),
+                ]))
+            })
+            .collect();
+
+        let list = List::new(items)
+            .block(Block::default().title("Help (press any key to close)").borders(Borders::ALL));
         f.render_widget(list, area);
     }
 }
