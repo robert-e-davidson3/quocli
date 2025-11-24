@@ -491,11 +491,22 @@ impl LlmClient for AnthropicClient {
         let positional_query = prompt::extract_positional_args_query(&usage_lines);
 
         let positional_json = self.call_api(positional_system, &positional_query, 256).await?;
-        let positional_names: Vec<String> = serde_json::from_str(&positional_json).unwrap_or_else(|e| {
-            tracing::warn!("Failed to parse positional args JSON: {}", e);
-            vec![]
-        });
-        tracing::info!("Extracted {} positional arg names from help text", positional_names.len());
+
+        #[derive(Deserialize)]
+        struct PositionalArgsResponse {
+            args: Vec<String>,
+            #[serde(default)]
+            positionals_first: bool,
+        }
+
+        let (positional_names, positionals_first) = serde_json::from_str::<PositionalArgsResponse>(&positional_json)
+            .map(|r| (r.args, r.positionals_first))
+            .unwrap_or_else(|e| {
+                tracing::warn!("Failed to parse positional args JSON: {}", e);
+                (vec![], false)
+            });
+        tracing::info!("Extracted {} positional arg names from help text (positionals_first: {})",
+            positional_names.len(), positionals_first);
 
         // Get command metadata (description, danger level) with a small LLM call
         let metadata_system = "You are a CLI analyzer. Return only valid JSON.";
@@ -711,6 +722,7 @@ JSON only, no other text."#,
             subcommands: vec![],
             danger_level: metadata.danger_level,
             examples: vec![],
+            positionals_first,
         };
 
         Ok(spec)

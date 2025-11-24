@@ -86,20 +86,22 @@ pub fn extract_positional_args_query(usage_text: &str) -> String {
 
 {usage_text}
 
-Return a JSON array of positional argument names. Only include actual positional arguments that the user provides as values, NOT:
+Return a JSON object with:
+1. "args": array of positional argument names (lowercase)
+2. "positionals_first": boolean - true if positional args come BEFORE flags in typical usage
+
+Only include actual positional arguments that the user provides as values, NOT:
 - Option placeholders like "SHORT-OPTION", "OPTION", "OPTIONS"
 - Meta-syntax like "LONG-OPTION"
 - Flag descriptions
 
 For example:
-- "echo [STRING]..." -> ["STRING"]
-- "cp SOURCE DEST" -> ["SOURCE", "DEST"]
-- "mount <source> <directory>" -> ["source", "directory"]
-- "cat [OPTION]... [FILE]..." -> ["FILE"]
+- "echo [STRING]..." -> {{"args": ["string"], "positionals_first": false}}
+- "cp SOURCE DEST" -> {{"args": ["source", "dest"], "positionals_first": false}}
+- "find /path -name pattern" -> {{"args": ["path"], "positionals_first": true}}
+- "cat [OPTION]... [FILE]..." -> {{"args": ["file"], "positionals_first": false}}
 
-Return the argument names in lowercase, as a JSON array like: ["arg1", "arg2"]
+If there are no positional arguments: {{"args": [], "positionals_first": false}}
 
-If there are no positional arguments, return an empty array: []
-
-JSON array only, no other text."#)
+JSON object only, no other text."#)
 }

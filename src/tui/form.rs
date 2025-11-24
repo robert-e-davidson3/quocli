@@ -439,10 +439,11 @@ fn suggestion_rect(width: u16, height: u16, r: Rect) -> Rect {
 
 fn build_preview(spec: &CommandSpec, state: &FormState) -> String {
     let mut parts = vec![spec.command.clone()];
+    let mut flag_parts: Vec<String> = Vec::new();
     let mut positional_parts: Vec<String> = Vec::new();
 
-    // Process fields in two passes: flags first, then positionals
-    // This matches the order in executor::build_command
+    // Process fields in two passes: flags and positionals separately
+    // Then combine based on spec.positionals_first
 
     // First pass: flags (non-positional)
     for field in &state.fields {
@@ -453,11 +454,11 @@ fn build_preview(spec: &CommandSpec, state: &FormState) -> String {
         match field.field_type {
             ArgumentType::Bool => {
                 if field.value == "true" {
-                    parts.push(field.id.clone());
+                    flag_parts.push(field.id.clone());
                 }
             }
             _ => {
-                parts.push(field.id.clone());
+                flag_parts.push(field.id.clone());
                 let display_value = if field.sensitive {
                     "***".to_string()
                 } else if field.value.contains(' ') {
@@ -465,7 +466,7 @@ fn build_preview(spec: &CommandSpec, state: &FormState) -> String {
                 } else {
                     field.value.clone()
                 };
-                parts.push(display_value);
+                flag_parts.push(display_value);
             }
         }
     }
@@ -486,8 +487,14 @@ fn build_preview(spec: &CommandSpec, state: &FormState) -> String {
         positional_parts.push(display_value);
     }
 
-    // Add positionals at the end
-    parts.extend(positional_parts);
+    // Combine based on positionals_first setting
+    if spec.positionals_first {
+        parts.extend(positional_parts);
+        parts.extend(flag_parts);
+    } else {
+        parts.extend(flag_parts);
+        parts.extend(positional_parts);
+    }
 
     parts.join(" ")
 }
