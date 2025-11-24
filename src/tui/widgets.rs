@@ -29,7 +29,12 @@ impl FormField {
     pub fn from_option(opt: &CommandOption) -> Self {
         let id = opt.primary_flag().to_string();
         let label = if let Some(short) = opt.short_flag() {
-            format!("{}, {}", short, opt.primary_flag())
+            // Only show "short, long" if they're different
+            if short != opt.primary_flag() {
+                format!("{}, {}", short, opt.primary_flag())
+            } else {
+                short.to_string()
+            }
         } else {
             opt.primary_flag().to_string()
         };
@@ -101,6 +106,8 @@ pub struct FormState {
     pub selected_suggestion: usize,
     // Description scroll state
     pub description_scroll: u16,
+    // Help sheet state
+    pub showing_help: bool,
 }
 
 impl FormState {
@@ -144,6 +151,7 @@ impl FormState {
             env_suggestions: Vec::new(),
             selected_suggestion: 0,
             description_scroll: 0,
+            showing_help: false,
         }
     }
 
@@ -343,6 +351,54 @@ impl FormState {
         }
     }
 
+    /// Move to first field (Home)
+    pub fn move_to_top(&mut self) {
+        if !self.filtered_indices.is_empty() {
+            self.selected = self.filtered_indices[0];
+            self.description_scroll = 0;
+        }
+    }
+
+    /// Move to last field (End)
+    pub fn move_to_bottom(&mut self) {
+        if !self.filtered_indices.is_empty() {
+            self.selected = self.filtered_indices[self.filtered_indices.len() - 1];
+            self.description_scroll = 0;
+        }
+    }
+
+    /// Move up by a page (PageUp)
+    pub fn page_up(&mut self, page_size: usize) {
+        if self.filtered_indices.is_empty() {
+            return;
+        }
+
+        let current_pos = self.filtered_indices
+            .iter()
+            .position(|&i| i == self.selected)
+            .unwrap_or(0);
+
+        let new_pos = current_pos.saturating_sub(page_size);
+        self.selected = self.filtered_indices[new_pos];
+        self.description_scroll = 0;
+    }
+
+    /// Move down by a page (PageDown)
+    pub fn page_down(&mut self, page_size: usize) {
+        if self.filtered_indices.is_empty() {
+            return;
+        }
+
+        let current_pos = self.filtered_indices
+            .iter()
+            .position(|&i| i == self.selected)
+            .unwrap_or(0);
+
+        let new_pos = (current_pos + page_size).min(self.filtered_indices.len() - 1);
+        self.selected = self.filtered_indices[new_pos];
+        self.description_scroll = 0;
+    }
+
     /// Scroll description up (show earlier content)
     pub fn scroll_description_up(&mut self) {
         if self.description_scroll > 0 {
@@ -539,5 +595,10 @@ impl FormState {
     pub fn cancel_suggestions(&mut self) {
         self.showing_suggestions = false;
         self.env_suggestions.clear();
+    }
+
+    /// Toggle help sheet visibility
+    pub fn toggle_help(&mut self) {
+        self.showing_help = !self.showing_help;
     }
 }
