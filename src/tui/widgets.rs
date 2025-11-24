@@ -602,3 +602,556 @@ impl FormState {
         self.showing_help = !self.showing_help;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::CommandOption;
+
+    // Helper to create a test FormField
+    fn create_test_field(id: &str, field_type: ArgumentType, level: OptionLevel) -> FormField {
+        FormField {
+            id: id.to_string(),
+            label: id.to_string(),
+            description: format!("Description for {}", id),
+            field_type,
+            required: false,
+            sensitive: false,
+            value: String::new(),
+            enum_values: vec![],
+            default: None,
+            level,
+        }
+    }
+
+    #[test]
+    fn test_form_field_from_option() {
+        let opt = CommandOption {
+            flags: vec!["--verbose".to_string(), "-v".to_string()],
+            description: "Enable verbose output".to_string(),
+            argument_type: ArgumentType::Bool,
+            argument_name: None,
+            required: false,
+            sensitive: false,
+            repeatable: false,
+            conflicts_with: vec![],
+            requires: vec![],
+            default: Some("false".to_string()),
+            enum_values: vec![],
+            level: OptionLevel::Basic,
+        };
+
+        let field = FormField::from_option(&opt);
+        assert_eq!(field.id, "--verbose");
+        assert_eq!(field.label, "-v, --verbose");
+        assert_eq!(field.field_type, ArgumentType::Bool);
+        assert_eq!(field.default, Some("false".to_string()));
+    }
+
+    #[test]
+    fn test_form_field_from_positional() {
+        let arg = PositionalArg {
+            name: "file".to_string(),
+            description: "Input file".to_string(),
+            required: true,
+            sensitive: false,
+            argument_type: ArgumentType::Path,
+            default: None,
+        };
+
+        let field = FormField::from_positional(&arg);
+        assert_eq!(field.id, "_pos_file");
+        assert_eq!(field.label, "file");
+        assert!(field.required);
+        assert_eq!(field.level, OptionLevel::Basic);
+    }
+
+    #[test]
+    fn test_form_field_display_value_normal() {
+        let mut field = create_test_field("test", ArgumentType::String, OptionLevel::Basic);
+        field.value = "hello".to_string();
+
+        assert_eq!(field.display_value(), "hello");
+    }
+
+    #[test]
+    fn test_form_field_display_value_sensitive() {
+        let mut field = create_test_field("test", ArgumentType::String, OptionLevel::Basic);
+        field.sensitive = true;
+        field.value = "secret123".to_string();
+
+        let display = field.display_value();
+        assert!(display.contains("*"));
+        assert!(!display.contains("secret"));
+    }
+
+    #[test]
+    fn test_form_field_display_value_empty_with_default() {
+        let mut field = create_test_field("test", ArgumentType::String, OptionLevel::Basic);
+        field.default = Some("default_value".to_string());
+
+        assert_eq!(field.display_value(), "(default: default_value)");
+    }
+
+    #[test]
+    fn test_form_field_display_value_empty_no_default() {
+        let field = create_test_field("test", ArgumentType::String, OptionLevel::Basic);
+        assert_eq!(field.display_value(), "");
+    }
+
+    #[test]
+    fn test_form_state_new_basic_fields() {
+        let fields = vec![
+            create_test_field("a", ArgumentType::String, OptionLevel::Basic),
+            create_test_field("b", ArgumentType::String, OptionLevel::Advanced),
+            create_test_field("c", ArgumentType::String, OptionLevel::Basic),
+        ];
+
+        let state = FormState::new(fields);
+        assert_eq!(state.basic_indices, vec![0, 2]);
+        assert_eq!(state.advanced_indices, vec![1]);
+        assert_eq!(state.current_tab, OptionTab::Basic);
+        // Initially filtered to basic fields
+        assert_eq!(state.filtered_indices, vec![0, 2]);
+    }
+
+    #[test]
+    fn test_form_state_navigation() {
+        let fields = vec![
+            create_test_field("a", ArgumentType::String, OptionLevel::Basic),
+            create_test_field("b", ArgumentType::String, OptionLevel::Basic),
+            create_test_field("c", ArgumentType::String, OptionLevel::Basic),
+        ];
+
+        let mut state = FormState::new(fields);
+
+        // Initial selection
+        assert_eq!(state.selected, 0);
+
+        // Move down
+        state.move_down();
+        assert_eq!(state.selected, 1);
+
+        state.move_down();
+        assert_eq!(state.selected, 2);
+
+        // Can't move past end
+        state.move_down();
+        assert_eq!(state.selected, 2);
+
+        // Move up
+        state.move_up();
+        assert_eq!(state.selected, 1);
+
+        state.move_up();
+        assert_eq!(state.selected, 0);
+
+        // Can't move before start
+        state.move_up();
+        assert_eq!(state.selected, 0);
+    }
+
+    #[test]
+    fn test_form_state_move_to_top_and_bottom() {
+        let fields = vec![
+            create_test_field("a", ArgumentType::String, OptionLevel::Basic),
+            create_test_field("b", ArgumentType::String, OptionLevel::Basic),
+            create_test_field("c", ArgumentType::String, OptionLevel::Basic),
+        ];
+
+        let mut state = FormState::new(fields);
+
+        state.move_to_bottom();
+        assert_eq!(state.selected, 2);
+
+        state.move_to_top();
+        assert_eq!(state.selected, 0);
+    }
+
+    #[test]
+    fn test_form_state_page_navigation() {
+        let fields: Vec<FormField> = (0..20)
+            .map(|i| create_test_field(&format!("f{}", i), ArgumentType::String, OptionLevel::Basic))
+            .collect();
+
+        let mut state = FormState::new(fields);
+
+        state.page_down(5);
+        assert_eq!(state.selected, 5);
+
+        state.page_down(5);
+        assert_eq!(state.selected, 10);
+
+        state.page_up(3);
+        assert_eq!(state.selected, 7);
+    }
+
+    #[test]
+    fn test_form_state_tab_switching() {
+        let fields = vec![
+            create_test_field("a", ArgumentType::String, OptionLevel::Basic),
+            create_test_field("b", ArgumentType::String, OptionLevel::Advanced),
+        ];
+
+        let mut state = FormState::new(fields);
+
+        assert_eq!(state.current_tab, OptionTab::Basic);
+        assert_eq!(state.filtered_indices, vec![0]);
+
+        state.next_tab();
+        assert_eq!(state.current_tab, OptionTab::Advanced);
+        assert_eq!(state.filtered_indices, vec![1]);
+
+        state.next_tab();
+        assert_eq!(state.current_tab, OptionTab::Frequent);
+        // No frequent items yet
+        assert!(state.filtered_indices.is_empty());
+
+        state.next_tab();
+        assert_eq!(state.current_tab, OptionTab::Basic);
+    }
+
+    #[test]
+    fn test_form_state_set_tab() {
+        let fields = vec![
+            create_test_field("a", ArgumentType::String, OptionLevel::Basic),
+            create_test_field("b", ArgumentType::String, OptionLevel::Advanced),
+        ];
+
+        let mut state = FormState::new(fields);
+
+        state.set_tab(OptionTab::Advanced);
+        assert_eq!(state.current_tab, OptionTab::Advanced);
+        assert_eq!(state.filtered_indices, vec![1]);
+    }
+
+    #[test]
+    fn test_form_state_editing() {
+        let fields = vec![create_test_field("test", ArgumentType::String, OptionLevel::Basic)];
+
+        let mut state = FormState::new(fields);
+
+        state.start_editing();
+        assert!(state.editing);
+
+        state.insert_char('h');
+        state.insert_char('i');
+        assert_eq!(state.fields[0].value, "hi");
+        assert_eq!(state.cursor_pos, 2);
+
+        state.delete_char();
+        assert_eq!(state.fields[0].value, "h");
+        assert_eq!(state.cursor_pos, 1);
+
+        state.stop_editing();
+        assert!(!state.editing);
+    }
+
+    #[test]
+    fn test_form_state_toggle_bool() {
+        let fields = vec![create_test_field("flag", ArgumentType::Bool, OptionLevel::Basic)];
+
+        let mut state = FormState::new(fields);
+
+        // Initially empty (treated as false)
+        state.toggle_bool();
+        assert_eq!(state.fields[0].value, "true");
+
+        state.toggle_bool();
+        assert_eq!(state.fields[0].value, "false");
+
+        state.toggle_bool();
+        assert_eq!(state.fields[0].value, "true");
+    }
+
+    #[test]
+    fn test_form_state_cycle_enum() {
+        let mut field = create_test_field("color", ArgumentType::Enum, OptionLevel::Basic);
+        field.enum_values = vec!["red".to_string(), "green".to_string(), "blue".to_string()];
+
+        let mut state = FormState::new(vec![field]);
+
+        // Empty -> first value
+        state.cycle_enum();
+        assert_eq!(state.fields[0].value, "red");
+
+        state.cycle_enum();
+        assert_eq!(state.fields[0].value, "green");
+
+        state.cycle_enum();
+        assert_eq!(state.fields[0].value, "blue");
+
+        // Back to empty for optional enum
+        state.cycle_enum();
+        assert_eq!(state.fields[0].value, "");
+    }
+
+    #[test]
+    fn test_form_state_cycle_required_enum() {
+        let mut field = create_test_field("color", ArgumentType::Enum, OptionLevel::Basic);
+        field.enum_values = vec!["red".to_string(), "green".to_string()];
+        field.required = true;
+
+        let mut state = FormState::new(vec![field]);
+
+        state.cycle_enum();
+        assert_eq!(state.fields[0].value, "green"); // Starts at index 0, goes to 1
+
+        state.cycle_enum();
+        assert_eq!(state.fields[0].value, "red"); // Wraps around to 0
+    }
+
+    #[test]
+    fn test_form_state_get_values() {
+        let fields = vec![
+            create_test_field("a", ArgumentType::String, OptionLevel::Basic),
+            create_test_field("b", ArgumentType::String, OptionLevel::Basic),
+            create_test_field("c", ArgumentType::String, OptionLevel::Basic),
+        ];
+
+        let mut state = FormState::new(fields);
+        state.fields[0].value = "value_a".to_string();
+        state.fields[2].value = "value_c".to_string();
+        // fields[1] left empty
+
+        let values = state.get_values();
+        assert_eq!(values.len(), 2);
+        assert_eq!(values.get("a"), Some(&"value_a".to_string()));
+        assert_eq!(values.get("c"), Some(&"value_c".to_string()));
+        assert!(values.get("b").is_none());
+    }
+
+    #[test]
+    fn test_form_state_clear_all_values() {
+        let fields = vec![
+            create_test_field("a", ArgumentType::String, OptionLevel::Basic),
+            create_test_field("b", ArgumentType::String, OptionLevel::Basic),
+        ];
+
+        let mut state = FormState::new(fields);
+        state.fields[0].value = "value_a".to_string();
+        state.fields[1].value = "value_b".to_string();
+
+        state.clear_all_values();
+
+        assert!(state.fields[0].value.is_empty());
+        assert!(state.fields[1].value.is_empty());
+    }
+
+    #[test]
+    fn test_form_state_load_cached_values() {
+        let fields = vec![
+            create_test_field("a", ArgumentType::String, OptionLevel::Basic),
+            create_test_field("b", ArgumentType::String, OptionLevel::Basic),
+            create_test_field("c", ArgumentType::String, OptionLevel::Basic),
+        ];
+
+        let mut state = FormState::new(fields);
+
+        let mut cached = HashMap::new();
+        cached.insert("a".to_string(), "cached_a".to_string());
+        cached.insert("c".to_string(), "cached_c".to_string());
+
+        state.load_cached_values(&cached);
+
+        assert_eq!(state.fields[0].value, "cached_a");
+        assert!(state.fields[1].value.is_empty());
+        assert_eq!(state.fields[2].value, "cached_c");
+        assert_eq!(state.frequent_indices, vec![0, 2]);
+    }
+
+    #[test]
+    fn test_form_state_search() {
+        let fields = vec![
+            create_test_field("--verbose", ArgumentType::Bool, OptionLevel::Basic),
+            create_test_field("--output", ArgumentType::Path, OptionLevel::Basic),
+            create_test_field("--version", ArgumentType::Bool, OptionLevel::Basic),
+        ];
+
+        let mut state = FormState::new(fields);
+
+        state.start_search(false);
+        assert!(state.search_mode);
+
+        state.search_insert_char('v');
+        state.search_insert_char('e');
+        state.search_insert_char('r');
+
+        // Should match --verbose and --version
+        assert_eq!(state.filtered_indices.len(), 2);
+        assert!(state.filtered_indices.contains(&0)); // --verbose
+        assert!(state.filtered_indices.contains(&2)); // --version
+
+        state.clear_search();
+        assert_eq!(state.filtered_indices.len(), 3);
+    }
+
+    #[test]
+    fn test_form_state_search_delete_char() {
+        let fields = vec![
+            create_test_field("--verbose", ArgumentType::Bool, OptionLevel::Basic),
+            create_test_field("--output", ArgumentType::Path, OptionLevel::Basic),
+        ];
+
+        let mut state = FormState::new(fields);
+
+        state.start_search(false);
+        state.search_insert_char('v');
+        state.search_insert_char('e');
+
+        assert_eq!(state.search_query, "ve");
+
+        state.search_delete_char();
+        assert_eq!(state.search_query, "v");
+    }
+
+    #[test]
+    fn test_form_state_visible_fields() {
+        let fields = vec![
+            create_test_field("a", ArgumentType::String, OptionLevel::Basic),
+            create_test_field("b", ArgumentType::String, OptionLevel::Advanced),
+            create_test_field("c", ArgumentType::String, OptionLevel::Basic),
+        ];
+
+        let state = FormState::new(fields);
+
+        let visible = state.visible_fields();
+        assert_eq!(visible.len(), 2);
+        assert_eq!(visible[0].0, 0);
+        assert_eq!(visible[0].1.id, "a");
+        assert_eq!(visible[1].0, 2);
+        assert_eq!(visible[1].1.id, "c");
+    }
+
+    #[test]
+    fn test_form_state_current_field() {
+        let fields = vec![
+            create_test_field("a", ArgumentType::String, OptionLevel::Basic),
+            create_test_field("b", ArgumentType::String, OptionLevel::Basic),
+        ];
+
+        let mut state = FormState::new(fields);
+
+        assert_eq!(state.current_field().unwrap().id, "a");
+
+        state.move_down();
+        assert_eq!(state.current_field().unwrap().id, "b");
+    }
+
+    #[test]
+    fn test_form_state_scroll_description() {
+        let fields = vec![create_test_field("test", ArgumentType::String, OptionLevel::Basic)];
+
+        let mut state = FormState::new(fields);
+
+        assert_eq!(state.description_scroll, 0);
+
+        state.scroll_description_down(10);
+        assert_eq!(state.description_scroll, 1);
+
+        state.scroll_description_down(10);
+        state.scroll_description_down(10);
+        assert_eq!(state.description_scroll, 3);
+
+        state.scroll_description_up();
+        assert_eq!(state.description_scroll, 2);
+
+        // Can't scroll below 0
+        state.scroll_description_up();
+        state.scroll_description_up();
+        state.scroll_description_up();
+        assert_eq!(state.description_scroll, 0);
+    }
+
+    #[test]
+    fn test_form_state_toggle_help() {
+        let fields = vec![create_test_field("test", ArgumentType::String, OptionLevel::Basic)];
+
+        let mut state = FormState::new(fields);
+
+        assert!(!state.showing_help);
+
+        state.toggle_help();
+        assert!(state.showing_help);
+
+        state.toggle_help();
+        assert!(!state.showing_help);
+    }
+
+    #[test]
+    fn test_form_state_suggestions() {
+        let fields = vec![create_test_field("test", ArgumentType::String, OptionLevel::Basic)];
+
+        let mut state = FormState::new(fields);
+
+        assert!(!state.showing_suggestions);
+
+        // Manually set suggestions for testing
+        state.env_suggestions = vec![
+            ("HOME".to_string(), "/home/user".to_string()),
+            ("HOST".to_string(), "localhost".to_string()),
+        ];
+        state.showing_suggestions = true;
+        state.selected_suggestion = 0;
+
+        state.next_suggestion();
+        assert_eq!(state.selected_suggestion, 1);
+
+        state.next_suggestion();
+        assert_eq!(state.selected_suggestion, 0); // Wraps
+
+        state.prev_suggestion();
+        assert_eq!(state.selected_suggestion, 1);
+
+        state.cancel_suggestions();
+        assert!(!state.showing_suggestions);
+        assert!(state.env_suggestions.is_empty());
+    }
+
+    #[test]
+    fn test_form_state_accept_suggestion() {
+        let fields = vec![create_test_field("test", ArgumentType::String, OptionLevel::Basic)];
+
+        let mut state = FormState::new(fields);
+
+        // Set up a scenario where user typed "$HO"
+        state.fields[0].value = "$HO".to_string();
+        state.cursor_pos = 3;
+        state.env_suggestions = vec![("HOME".to_string(), "/home/user".to_string())];
+        state.showing_suggestions = true;
+        state.selected_suggestion = 0;
+
+        state.accept_suggestion();
+
+        assert_eq!(state.fields[0].value, "$HOME");
+        assert!(!state.showing_suggestions);
+    }
+
+    #[test]
+    fn test_form_state_empty_fields() {
+        let state = FormState::new(vec![]);
+
+        assert!(state.fields.is_empty());
+        assert!(state.filtered_indices.is_empty());
+        assert!(state.current_field().is_none());
+    }
+
+    #[test]
+    fn test_form_state_navigation_with_filtering() {
+        let fields = vec![
+            create_test_field("a", ArgumentType::String, OptionLevel::Basic),
+            create_test_field("b", ArgumentType::String, OptionLevel::Advanced),
+            create_test_field("c", ArgumentType::String, OptionLevel::Basic),
+        ];
+
+        let mut state = FormState::new(fields);
+
+        // Only basic fields visible
+        assert_eq!(state.filtered_indices, vec![0, 2]);
+
+        // Navigate within filtered
+        assert_eq!(state.selected, 0);
+        state.move_down();
+        assert_eq!(state.selected, 2); // Skips index 1
+    }
+}
