@@ -96,31 +96,41 @@ async fn main() -> Result<()> {
     // Run interactive TUI
     let form_result = tui::run_form(&config, &spec, cached_values).await?;
 
-    if let Some(values) = form_result {
-        // Build and execute command
-        let command_line = executor::build_command(&spec, &values);
+    match form_result {
+        tui::FormResult::Execute(values) => {
+            // Build and execute command
+            let command_line = executor::build_command(&spec, &values);
 
-        // Show danger warning for high-risk commands
-        if spec.danger_level == parser::DangerLevel::High
-            || spec.danger_level == parser::DangerLevel::Critical
-        {
-            if !tui::confirm_dangerous(&spec, &command_line)? {
-                println!("Execution cancelled.");
-                return Ok(());
+            // Show danger warning for high-risk commands
+            if spec.danger_level == parser::DangerLevel::High
+                || spec.danger_level == parser::DangerLevel::Critical
+            {
+                if !tui::confirm_dangerous(&spec, &command_line)? {
+                    println!("Execution cancelled.");
+                    return Ok(());
+                }
             }
+
+            let result = executor::execute(&command_line).await?;
+
+            // Cache non-sensitive values
+            cache
+                .save_values(command_name, &values, &spec.options)
+                .await?;
+
+            // Export to shell history
+            shell::export_to_history(&config.shell, &command_line)?;
+
+            std::process::exit(result.code.unwrap_or(0));
         }
-
-        let result = executor::execute(&command_line).await?;
-
-        // Cache non-sensitive values
-        cache
-            .save_values(command_name, &values, &spec.options)
-            .await?;
-
-        // Export to shell history
-        shell::export_to_history(&config.shell, &command_line)?;
-
-        std::process::exit(result.code.unwrap_or(0));
+        tui::FormResult::Preview(values) => {
+            // Build command and print it without executing
+            let command_line = executor::build_command(&spec, &values);
+            println!("{}", command_line);
+        }
+        tui::FormResult::Cancel => {
+            // User cancelled, do nothing
+        }
     }
 
     Ok(())

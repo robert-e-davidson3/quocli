@@ -1,6 +1,6 @@
 use crate::llm::client::{async_trait, LlmClient};
 use crate::llm::prompt;
-use crate::parser::{CommandOption, CommandSpec, DangerLevel, HelpDocumentation};
+use crate::parser::{ArgumentType, CommandOption, CommandSpec, DangerLevel, HelpDocumentation, PositionalArg};
 use crate::QuocliError;
 use futures::stream::{FuturesUnordered, StreamExt};
 use futures::future::BoxFuture;
@@ -28,9 +28,10 @@ impl AnthropicClient {
     }
 
     /// Make an API call and return the text response with retry logic
-    async fn call_api(&self, system: &str, user: &str, max_tokens: u32) -> Result<String, QuocliError> {
+    async fn call_api(&self, system: &str, user: &str, max_tokens: u32, model_override: Option<&str>) -> Result<String, QuocliError> {
+        let model = model_override.map(|s| s.to_string()).unwrap_or_else(|| self.model.clone());
         let request = AnthropicRequest {
-            model: self.model.clone(),
+            model,
             max_tokens,
             system: system.to_string(),
             messages: vec![Message {
@@ -266,6 +267,142 @@ fn extract_flags_from_help(help_text: &str) -> Vec<Vec<String>> {
     all_flags
 }
 
+/// Extract positional arguments from help text using regex (local, no LLM needed)
+fn extract_positional_args_from_help(help_text: &str) -> Vec<PositionalArg> {
+    let mut positional_args: Vec<PositionalArg> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    // Find usage lines - typically contain the command invocation pattern
+    // Look for lines starting with "Usage:", "usage:", or indented command patterns
+    let usage_section_pattern = Regex::new(r"(?mi)^(?:usage:?\s*\n?|^\s{0,4}[a-z][\w-]*\s+\[)").unwrap();
+
+    // Pattern to match required positional args: <arg>, <arg>...
+    let required_pattern = Regex::new(r"<([a-zA-Z][a-zA-Z0-9_-]*)>(?:\.\.\.)?").unwrap();
+
+    // Pattern to match optional positional args: [arg] (but not [--flag] or [-f])
+    let optional_pattern = Regex::new(r"\[([a-zA-Z][a-zA-Z0-9_-]*)\](?:\.\.\.)?").unwrap();
+
+    // Pattern to match UPPERCASE positional args like SOURCE, FILE, DIRECTORY
+    // Use word boundaries instead of look-around (not supported by rust regex)
+    let uppercase_pattern = Regex::new(r"\b([A-Z][A-Z0-9_]{1,})\b(?:\.\.\.)?").unwrap();
+
+    // Extract the usage section (first few lines after "Usage:" or the whole text if no usage section)
+    let usage_text = if let Some(m) = usage_section_pattern.find(help_text) {
+        // Get text from usage marker to next blank line or section
+        let start = m.start();
+        let remaining = &help_text[start..];
+        // Take lines until we hit a blank line or a new section (line starting with letter and colon)
+        let mut end_offset = 0;
+        for (i, line) in remaining.lines().enumerate() {
+            if i > 0 && (line.trim().is_empty() || (line.chars().next().map(|c| c.is_ascii_alphabetic()).unwrap_or(false) && line.contains(':'))) {
+                break;
+            }
+            // Stop after 10 lines to avoid going too far
+            if i > 10 {
+                break;
+            }
+            // Add this line's length plus newline
+            end_offset += line.len() + 1;
+        }
+        // Clamp to remaining length in case we counted past the end
+        &remaining[..end_offset.min(remaining.len())]
+    } else {
+        // No usage section found, use first 500 chars
+        &help_text[..help_text.len().min(500)]
+    };
+
+    // Helper to infer argument type from name
+    let infer_type = |name: &str| -> ArgumentType {
+        let lower = name.to_lowercase();
+        if lower.contains("file") || lower.contains("path") || lower.contains("dir")
+            || lower == "source" || lower == "target" || lower == "dest"
+            || lower == "destination" || lower == "src" || lower == "dst"
+            || lower.contains("mount") {
+            ArgumentType::Path
+        } else if lower.contains("num") || lower.contains("count") || lower == "n" {
+            ArgumentType::Int
+        } else {
+            ArgumentType::String
+        }
+    };
+
+    // Extract required positional args
+    for cap in required_pattern.captures_iter(usage_text) {
+        let name = cap.get(1).unwrap().as_str().to_string();
+        let lower_name = name.to_lowercase();
+
+        // Skip if it looks like a flag value placeholder (common patterns)
+        if lower_name == "value" || lower_name == "arg" || lower_name == "option"
+            || lower_name == "options" || lower_name == "args" {
+            continue;
+        }
+
+        if !seen.contains(&lower_name) {
+            seen.insert(lower_name.clone());
+            positional_args.push(PositionalArg {
+                name: name.clone(),
+                description: String::new(),
+                required: true,
+                sensitive: false,
+                argument_type: infer_type(&name),
+                default: None,
+            });
+        }
+    }
+
+    // Extract optional positional args
+    for cap in optional_pattern.captures_iter(usage_text) {
+        let name = cap.get(1).unwrap().as_str().to_string();
+        let lower_name = name.to_lowercase();
+
+        // Skip if it looks like a flag or common placeholder
+        if lower_name == "options" || lower_name == "option" || lower_name == "args"
+            || lower_name == "flags" || name.starts_with('-') {
+            continue;
+        }
+
+        if !seen.contains(&lower_name) {
+            seen.insert(lower_name.clone());
+            positional_args.push(PositionalArg {
+                name,
+                description: String::new(),
+                required: false,
+                sensitive: false,
+                argument_type: infer_type(&lower_name),
+                default: None,
+            });
+        }
+    }
+
+    // Extract UPPERCASE positional args (only if we haven't found angle-bracket versions)
+    if positional_args.is_empty() {
+        for cap in uppercase_pattern.captures_iter(usage_text) {
+            let name = cap.get(1).unwrap().as_str().to_string();
+            let lower_name = name.to_lowercase();
+
+            // Skip common non-positional uppercase words
+            if lower_name == "usage" || lower_name == "options" || lower_name == "synopsis"
+                || lower_name == "description" || lower_name == "see" || lower_name == "also" {
+                continue;
+            }
+
+            if !seen.contains(&lower_name) {
+                seen.insert(lower_name.clone());
+                positional_args.push(PositionalArg {
+                    name: lower_name.clone(),
+                    description: String::new(),
+                    required: true, // UPPERCASE args are typically required
+                    sensitive: false,
+                    argument_type: infer_type(&lower_name),
+                    default: None,
+                });
+            }
+        }
+    }
+
+    positional_args
+}
+
 #[derive(Serialize)]
 struct AnthropicRequest {
     model: String,
@@ -348,6 +485,36 @@ impl LlmClient for AnthropicClient {
         let extracted_flags = extract_flags_from_help(help_text);
         tracing::info!("Extracted {} flag groups from help text", extracted_flags.len());
 
+        // Build cached context with full help text and manpage (used for all LLM calls)
+        let manpage_opt = if has_manpage {
+            Some(docs.manpage_text.as_str())
+        } else {
+            None
+        };
+        let cached_context = prompt::build_cached_context(&full_command, help_text, manpage_opt);
+
+        // Extract positional args using LLM with full context (use Sonnet for better semantic understanding)
+        let positional_system = "You are a CLI command parser. Extract positional argument names from usage syntax.";
+        let positional_query = prompt::extract_positional_args_query(&cached_context);
+
+        let positional_json = self.call_api(positional_system, &positional_query, 512, None).await?;
+
+        #[derive(Deserialize)]
+        struct PositionalArgsResponse {
+            args: Vec<String>,
+            #[serde(default)]
+            positionals_first: bool,
+        }
+
+        let (positional_names, positionals_first) = serde_json::from_str::<PositionalArgsResponse>(&positional_json)
+            .map(|r| (r.args, r.positionals_first))
+            .unwrap_or_else(|e| {
+                tracing::warn!("Failed to parse positional args JSON: {}", e);
+                (vec![], false)
+            });
+        tracing::info!("Extracted {} positional arg names from help text (positionals_first: {})",
+            positional_names.len(), positionals_first);
+
         // Get command metadata (description, danger level) with a small LLM call
         let metadata_system = "You are a CLI analyzer. Return only valid JSON.";
         let metadata_user = format!(
@@ -365,7 +532,7 @@ JSON only, no other text."#,
             help_text.chars().take(500).collect::<String>()
         );
 
-        let metadata_json = self.call_api(metadata_system, &metadata_user, 256).await?;
+        let metadata_json = self.call_api(metadata_system, &metadata_user, 256, None).await?;
 
         #[derive(Deserialize)]
         struct Metadata {
@@ -384,14 +551,6 @@ JSON only, no other text."#,
         let detail_system = prompt::option_detail_system_prompt();
         let total = extracted_flags.len();
         let mut detailed_options: Vec<CommandOption> = Vec::with_capacity(total);
-
-        // Build cached context with full help text and manpage
-        let manpage_opt = if has_manpage {
-            Some(docs.manpage_text.as_str())
-        } else {
-            None
-        };
-        let cached_context = prompt::build_cached_context(&full_command, help_text, manpage_opt);
 
         tracing::info!("Using prompt caching for {} options ({} concurrent)", total, MAX_CONCURRENT_REQUESTS);
 
@@ -491,16 +650,78 @@ JSON only, no other text."#,
         eprintln!("\rProcessing options: {}/{}    ", total, total);
         tracing::info!("Successfully processed {} options", detailed_options.len());
 
+        // === PASS 3: Get details for each positional argument ===
+        let pos_total = positional_names.len();
+        let mut detailed_positional: Vec<PositionalArg> = Vec::with_capacity(pos_total);
+
+        if pos_total > 0 {
+            tracing::info!("Processing {} positional arguments", pos_total);
+            eprint!("\rProcessing positional args: 0/{}    ", pos_total);
+            io::stderr().flush().ok();
+
+            // Helper to create positional arg extraction future
+            let make_positional_future = |arg_name: String, detail_system: String, cached_context: String| -> BoxFuture<'_, Result<PositionalArg, QuocliError>> {
+                Box::pin(async move {
+                    let query = prompt::single_positional_arg_query(&arg_name);
+                    let detail_json = self.call_api_cached(
+                        &detail_system,
+                        &cached_context,
+                        &query,
+                        1024,
+                        Some("claude-haiku-4-5-20251001"),
+                    ).await?;
+
+                    let detailed: PositionalArg = serde_json::from_str(&detail_json).map_err(|e| {
+                        tracing::warn!("Failed to parse positional arg details for {}: {}", arg_name, e);
+                        QuocliError::Llm(format!("Failed to parse positional arg detail: {}", e))
+                    })?;
+
+                    Ok(detailed)
+                })
+            };
+
+            // Process positional args with streaming concurrency
+            let mut arg_iter = positional_names.into_iter();
+            let mut pos_in_flight: FuturesUnordered<BoxFuture<'_, Result<PositionalArg, QuocliError>>> = FuturesUnordered::new();
+
+            // Start initial batch of concurrent requests
+            for _ in 0..MAX_CONCURRENT_REQUESTS {
+                if let Some(arg_name) = arg_iter.next() {
+                    pos_in_flight.push(make_positional_future(arg_name, detail_system.clone(), cached_context.clone()));
+                }
+            }
+
+            // Process results as they complete, starting new requests immediately
+            while let Some(result) = pos_in_flight.next().await {
+                let detailed = result?;
+                detailed_positional.push(detailed);
+
+                // Show progress
+                eprint!("\rProcessing positional args: {}/{}    ", detailed_positional.len(), pos_total);
+                io::stderr().flush().ok();
+
+                // Start next request if there are more args
+                if let Some(arg_name) = arg_iter.next() {
+                    pos_in_flight.push(make_positional_future(arg_name, detail_system.clone(), cached_context.clone()));
+                }
+            }
+
+            // Clear the progress line
+            eprintln!("\rProcessing positional args: {}/{}    ", pos_total, pos_total);
+            tracing::info!("Successfully processed {} positional arguments", detailed_positional.len());
+        }
+
         // === Assemble final spec ===
         let spec = CommandSpec {
             command: command.to_string(),
             version_hash: help_hash.to_string(),
             description: metadata.description,
             options: detailed_options,
-            positional_args: vec![], // TODO: extract positional args from help text
+            positional_args: detailed_positional,
             subcommands: vec![],
             danger_level: metadata.danger_level,
             examples: vec![],
+            positionals_first,
         };
 
         Ok(spec)
@@ -549,5 +770,225 @@ JSON only, no other text."#,
             .ok_or_else(|| QuocliError::Llm("Empty response from API".to_string()))?;
 
         Ok(text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_required_positional_args() {
+        let help_text = r#"
+Usage:
+ mount [options] <source> <directory>
+
+Mount a filesystem.
+"#;
+        let args = extract_positional_args_from_help(help_text);
+
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0].name, "source");
+        assert!(args[0].required);
+        assert_eq!(args[0].argument_type, ArgumentType::Path);
+
+        assert_eq!(args[1].name, "directory");
+        assert!(args[1].required);
+        assert_eq!(args[1].argument_type, ArgumentType::Path);
+    }
+
+    #[test]
+    fn test_extract_optional_positional_args() {
+        let help_text = r#"
+Usage: mycommand [options] [file]
+
+Process a file.
+"#;
+        let args = extract_positional_args_from_help(help_text);
+
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0].name, "file");
+        assert!(!args[0].required);
+        assert_eq!(args[0].argument_type, ArgumentType::Path);
+    }
+
+    #[test]
+    fn test_extract_mixed_positional_args() {
+        let help_text = r#"
+Usage: cp [options] <source> [dest]
+
+Copy files.
+"#;
+        let args = extract_positional_args_from_help(help_text);
+
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0].name, "source");
+        assert!(args[0].required);
+
+        assert_eq!(args[1].name, "dest");
+        assert!(!args[1].required);
+        assert_eq!(args[1].argument_type, ArgumentType::Path);
+    }
+
+    #[test]
+    fn test_extract_uppercase_positional_args() {
+        let help_text = r#"
+Usage: tar [options] FILE...
+
+Archive files.
+"#;
+        let args = extract_positional_args_from_help(help_text);
+
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0].name, "file");
+        assert!(args[0].required);
+        assert_eq!(args[0].argument_type, ArgumentType::Path);
+    }
+
+    #[test]
+    fn test_infer_path_type_from_name() {
+        let help_text = r#"
+Usage: mycommand <file> <path> <directory> <src> <dst> <target>
+"#;
+        let args = extract_positional_args_from_help(help_text);
+
+        for arg in &args {
+            assert_eq!(arg.argument_type, ArgumentType::Path,
+                "Expected {} to be Path type", arg.name);
+        }
+    }
+
+    #[test]
+    fn test_infer_int_type_from_name() {
+        let help_text = r#"
+Usage: mycommand <count> <num>
+"#;
+        let args = extract_positional_args_from_help(help_text);
+
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0].argument_type, ArgumentType::Int);
+        assert_eq!(args[1].argument_type, ArgumentType::Int);
+    }
+
+    #[test]
+    fn test_infer_string_type_default() {
+        let help_text = r#"
+Usage: mycommand <name> <pattern>
+"#;
+        let args = extract_positional_args_from_help(help_text);
+
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0].argument_type, ArgumentType::String);
+        assert_eq!(args[1].argument_type, ArgumentType::String);
+    }
+
+    #[test]
+    fn test_skip_placeholder_args() {
+        let help_text = r#"
+Usage: mycommand <value> <arg> <options> <file>
+"#;
+        let args = extract_positional_args_from_help(help_text);
+
+        // Should only extract <file>, skipping <value>, <arg>, <options>
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0].name, "file");
+    }
+
+    #[test]
+    fn test_no_positional_args() {
+        let help_text = r#"
+Usage: mycommand [options]
+
+Options:
+  -v, --verbose    Be verbose
+  -h, --help       Show help
+"#;
+        let args = extract_positional_args_from_help(help_text);
+
+        assert_eq!(args.len(), 0);
+    }
+
+    #[test]
+    fn test_deduplicates_args() {
+        let help_text = r#"
+Usage:
+ mount [options] <source> <directory>
+ mount [options] <source>
+"#;
+        let args = extract_positional_args_from_help(help_text);
+
+        // Should deduplicate 'source'
+        assert_eq!(args.len(), 2);
+        let names: Vec<_> = args.iter().map(|a| a.name.as_str()).collect();
+        assert!(names.contains(&"source"));
+        assert!(names.contains(&"directory"));
+    }
+
+    #[test]
+    fn test_mount_command_usage() {
+        // Real mount command usage pattern
+        let help_text = r#"
+Usage:
+ mount [-lhV]
+ mount -a [options]
+ mount [options] [--source] <source> | [--target] <directory>
+ mount [options] <source> <directory>
+ mount <operation> <mountpoint> [<target>]
+
+Mount a filesystem.
+
+Options:
+ -a, --all               mount all filesystems
+"#;
+        let args = extract_positional_args_from_help(help_text);
+
+        // Should extract source, directory, operation, mountpoint, target
+        assert!(args.len() >= 2, "Expected at least 2 args, got {}", args.len());
+
+        let names: Vec<_> = args.iter().map(|a| a.name.as_str()).collect();
+        assert!(names.contains(&"source"), "Missing 'source' arg");
+        assert!(names.contains(&"directory"), "Missing 'directory' arg");
+    }
+
+    #[test]
+    fn test_variadic_args() {
+        let help_text = r#"
+Usage: cat [options] <file>...
+"#;
+        let args = extract_positional_args_from_help(help_text);
+
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0].name, "file");
+        assert!(args[0].required);
+    }
+
+    #[test]
+    fn test_usage_section_extraction() {
+        // Test that we stop at the Options section
+        let help_text = r#"
+Usage: mycommand <file>
+
+Options:
+  -v, --verbose    Be verbose
+
+Description:
+  This is a <placeholder> that should not be extracted.
+"#;
+        let args = extract_positional_args_from_help(help_text);
+
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0].name, "file");
+    }
+
+    #[test]
+    fn test_prefers_angle_brackets_over_uppercase() {
+        let help_text = r#"
+Usage: mycommand <file> FILE
+"#;
+        let args = extract_positional_args_from_help(help_text);
+
+        // Should extract <file> but not FILE since we found angle-bracket style
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0].name, "file");
     }
 }

@@ -55,3 +55,53 @@ Respond with only JSON, no other text."#,
         flags_str
     )
 }
+
+/// User prompt for single positional argument extraction (used with cached context)
+pub fn single_positional_arg_query(arg_name: &str) -> String {
+    format!(r#"Extract detailed information for this positional argument: {arg_name}
+
+Return a JSON object with this structure:
+{{
+  "name": "{arg_name}",
+  "description": "Detailed description of what this argument represents",
+  "argument_type": "string",
+  "required": true,
+  "sensitive": false,
+  "default": null
+}}
+
+Guidelines:
+- description: Full description from the documentation above explaining what this argument is for
+- argument_type: "bool", "string", "int", "float", "path", or "enum"
+- required: true if this argument must be provided, false if optional
+- sensitive: true if this typically contains secrets/tokens/passwords
+- default: default value if specified in documentation
+
+Respond with only JSON, no other text."#)
+}
+
+/// User prompt for extracting positional argument names from usage/synopsis
+pub fn extract_positional_args_query(usage_text: &str) -> String {
+    format!(r#"Analyze this command usage/synopsis and identify the positional arguments:
+
+{usage_text}
+
+Return a JSON object with:
+1. "args": array of positional argument names (lowercase)
+2. "positionals_first": boolean - true if positional args come BEFORE flags in typical usage
+
+Only include actual positional arguments that the user provides as values, NOT:
+- Option placeholders like "SHORT-OPTION", "OPTION", "OPTIONS"
+- Meta-syntax like "LONG-OPTION"
+- Flag descriptions
+
+For example:
+- "echo [STRING]..." -> {{"args": ["string"], "positionals_first": false}}
+- "cp SOURCE DEST" -> {{"args": ["source", "dest"], "positionals_first": false}}
+- "find /path -name pattern" -> {{"args": ["path"], "positionals_first": true}}
+- "cat [OPTION]... [FILE]..." -> {{"args": ["file"], "positionals_first": false}}
+
+If there are no positional arguments: {{"args": [], "positionals_first": false}}
+
+JSON object only, no other text."#)
+}

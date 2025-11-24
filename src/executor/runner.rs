@@ -14,9 +14,11 @@ pub struct ExecutionResult {
 /// Build the command line string from spec and values
 pub fn build_command(spec: &CommandSpec, values: &HashMap<String, String>) -> String {
     let mut parts = vec![spec.command.clone()];
-    let mut positional_values: Vec<(String, String)> = Vec::new();
+    let mut flag_parts: Vec<String> = Vec::new();
+    let mut positional_parts: Vec<String> = Vec::new();
 
     // Separate positional and flag values
+    let mut positional_values: Vec<(String, String)> = Vec::new();
     for (key, value) in values {
         if key.starts_with("_pos_") {
             positional_values.push((key.clone(), value.clone()));
@@ -26,7 +28,7 @@ pub fn build_command(spec: &CommandSpec, values: &HashMap<String, String>) -> St
     // Sort positional by name to maintain order
     positional_values.sort_by(|a, b| a.0.cmp(&b.0));
 
-    // Process options
+    // Process options into flag_parts
     for opt in &spec.options {
         let primary = opt.primary_flag();
         if let Some(value) = values.get(primary) {
@@ -40,33 +42,33 @@ pub fn build_command(spec: &CommandSpec, values: &HashMap<String, String>) -> St
             match opt.argument_type {
                 ArgumentType::Bool => {
                     if resolved == "true" {
-                        parts.push(primary.to_string());
+                        flag_parts.push(primary.to_string());
                     }
                 }
                 ArgumentType::Path => {
-                    parts.push(primary.to_string());
+                    flag_parts.push(primary.to_string());
                     // Expand tilde for path arguments
                     let expanded = shellexpand::tilde(&resolved).to_string();
                     if expanded.contains(' ') {
-                        parts.push(format!("\"{}\"", expanded));
+                        flag_parts.push(format!("\"{}\"", expanded));
                     } else {
-                        parts.push(expanded);
+                        flag_parts.push(expanded);
                     }
                 }
                 _ => {
-                    parts.push(primary.to_string());
+                    flag_parts.push(primary.to_string());
                     // Quote values with spaces
                     if resolved.contains(' ') {
-                        parts.push(format!("\"{}\"", resolved));
+                        flag_parts.push(format!("\"{}\"", resolved));
                     } else {
-                        parts.push(resolved);
+                        flag_parts.push(resolved);
                     }
                 }
             }
         }
     }
 
-    // Add positional arguments at the end (also expand tilde for paths)
+    // Process positional arguments into positional_parts
     for (key, value) in positional_values {
         // Check if this positional arg is a path type
         let arg_type = spec.positional_args.iter()
@@ -84,10 +86,19 @@ pub fn build_command(spec: &CommandSpec, values: &HashMap<String, String>) -> St
         };
 
         if final_value.contains(' ') {
-            parts.push(format!("\"{}\"", final_value));
+            positional_parts.push(format!("\"{}\"", final_value));
         } else {
-            parts.push(final_value);
+            positional_parts.push(final_value);
         }
+    }
+
+    // Combine based on positionals_first setting
+    if spec.positionals_first {
+        parts.extend(positional_parts);
+        parts.extend(flag_parts);
+    } else {
+        parts.extend(flag_parts);
+        parts.extend(positional_parts);
     }
 
     parts.join(" ")

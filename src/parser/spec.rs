@@ -169,6 +169,10 @@ pub struct CommandSpec {
     pub subcommands: Vec<String>,
     pub danger_level: DangerLevel,
     pub examples: Vec<String>,
+    /// Whether positional args come before flags (e.g., `find /path -name`)
+    /// Default is false (standard: `command [flags] <positionals>`)
+    #[serde(default)]
+    pub positionals_first: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
