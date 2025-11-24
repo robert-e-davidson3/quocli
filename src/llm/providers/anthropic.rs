@@ -28,9 +28,10 @@ impl AnthropicClient {
     }
 
     /// Make an API call and return the text response with retry logic
-    async fn call_api(&self, system: &str, user: &str, max_tokens: u32) -> Result<String, QuocliError> {
+    async fn call_api(&self, system: &str, user: &str, max_tokens: u32, model_override: Option<&str>) -> Result<String, QuocliError> {
+        let model = model_override.map(|s| s.to_string()).unwrap_or_else(|| self.model.clone());
         let request = AnthropicRequest {
-            model: self.model.clone(),
+            model,
             max_tokens,
             system: system.to_string(),
             messages: vec![Message {
@@ -492,11 +493,11 @@ impl LlmClient for AnthropicClient {
         };
         let cached_context = prompt::build_cached_context(&full_command, help_text, manpage_opt);
 
-        // Extract positional args using LLM with full context
+        // Extract positional args using LLM with full context (use Sonnet for better semantic understanding)
         let positional_system = "You are a CLI command parser. Extract positional argument names from usage syntax.";
         let positional_query = prompt::extract_positional_args_query(&cached_context);
 
-        let positional_json = self.call_api(positional_system, &positional_query, 512).await?;
+        let positional_json = self.call_api(positional_system, &positional_query, 512, None).await?;
 
         #[derive(Deserialize)]
         struct PositionalArgsResponse {
@@ -531,7 +532,7 @@ JSON only, no other text."#,
             help_text.chars().take(500).collect::<String>()
         );
 
-        let metadata_json = self.call_api(metadata_system, &metadata_user, 256).await?;
+        let metadata_json = self.call_api(metadata_system, &metadata_user, 256, None).await?;
 
         #[derive(Deserialize)]
         struct Metadata {
