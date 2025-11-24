@@ -164,6 +164,14 @@ fn run_form_loop(
                     KeyCode::Char(c) => state.search_insert_char(c),
                     _ => {}
                 }
+            } else if state.showing_help {
+                // Close help sheet on any key
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => {
+                        state.showing_help = false;
+                    }
+                    _ => state.showing_help = false,
+                }
             } else {
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => {
@@ -173,6 +181,7 @@ fn run_form_loop(
                             return Ok(FormResult::Cancel);
                         }
                     }
+                    KeyCode::Char('?') => state.toggle_help(),
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         return Ok(FormResult::Cancel)
                     }
@@ -210,6 +219,10 @@ fn run_form_loop(
                     KeyCode::Char('3') => state.set_tab(OptionTab::Frequent),
                     KeyCode::Up | KeyCode::Char('k') => state.move_up(),
                     KeyCode::Down | KeyCode::Char('j') => state.move_down(),
+                    KeyCode::PageUp => state.page_up(10),
+                    KeyCode::PageDown => state.page_down(10),
+                    KeyCode::Home => state.move_to_top(),
+                    KeyCode::End => state.move_to_bottom(),
                     KeyCode::Enter => {
                         if let Some(field) = state.current_field() {
                             match field.field_type {
@@ -225,6 +238,118 @@ fn run_form_loop(
                 }
             }
         }
+    }
+}
+
+/// Build help text lines with proper wrapping
+fn build_help_lines(state: &FormState, width: usize) -> Vec<Line<'static>> {
+    let commands: Vec<(&str, &str)> = if state.editing {
+        if state.showing_suggestions {
+            vec![
+                ("↑/↓", "select"),
+                ("Tab/Enter", "accept"),
+                ("Esc", "cancel"),
+            ]
+        } else {
+            vec![
+                ("Esc/Enter", "finish"),
+                ("$VAR", "env vars"),
+            ]
+        }
+    } else if state.search_mode {
+        vec![
+            ("Type", "search"),
+            ("↑/↓", "nav"),
+            ("Enter", "select"),
+            ("Esc", "clear"),
+        ]
+    } else {
+        vec![
+            ("↑/↓", "nav"),
+            ("PgUp/Dn", "page"),
+            ("Enter", "edit"),
+            ("/", "search"),
+            ("1/2/3", "tabs"),
+            ("^X", "clear"),
+            ("^E", "exec"),
+            ("^P", "preview"),
+            ("q", "cancel"),
+        ]
+    };
+
+    // Format commands as "key: desc"
+    let formatted: Vec<String> = commands
+        .iter()
+        .map(|(k, d)| format!("{}: {}", k, d))
+        .collect();
+
+    // Try to fit on one line
+    let separator = " | ";
+    let one_line = formatted.join(separator);
+
+    // For non-editing mode, we may need to show "?: help"
+    let help_suffix = if !state.editing && !state.search_mode { " | ?: help" } else { "" };
+
+    if one_line.len() + help_suffix.len() <= width {
+        return vec![Line::from(format!("{}{}", one_line, help_suffix))];
+    }
+
+    // Try to wrap to two lines without breaking commands
+    let mut line1: Vec<String> = Vec::new();
+    let mut line2: Vec<String> = Vec::new();
+    let mut current_len = 0;
+    let target_len = width.saturating_sub(2); // Leave some margin
+    let mut on_first_line = true;
+
+    for cmd in &formatted {
+        let cmd_len = cmd.len();
+        let sep_len = if (on_first_line && !line1.is_empty()) || (!on_first_line && !line2.is_empty()) {
+            separator.len()
+        } else {
+            0
+        };
+
+        if on_first_line {
+            if current_len + sep_len + cmd_len <= target_len {
+                line1.push(cmd.clone());
+                current_len += sep_len + cmd_len;
+            } else {
+                // Move to second line
+                on_first_line = false;
+                line2.push(cmd.clone());
+                current_len = cmd_len;
+            }
+        } else {
+            if current_len + sep_len + cmd_len <= target_len {
+                line2.push(cmd.clone());
+                current_len += sep_len + cmd_len;
+            } else {
+                // Would need a third line - truncate and add ?: help
+                if !state.editing && !state.search_mode {
+                    // Add ?: help at the end of line 1
+                    let line1_text = line1.join(separator);
+                    return vec![Line::from(format!("{} | ?: help", line1_text))];
+                } else {
+                    // Just show what fits on two lines
+                    break;
+                }
+            }
+        }
+    }
+
+    // Build the two lines
+    let line1_text = line1.join(separator);
+    let mut line2_text = line2.join(separator);
+
+    // Add help suffix to line 2 if room and in normal mode
+    if !state.editing && !state.search_mode && line2_text.len() + help_suffix.len() <= target_len {
+        line2_text.push_str(help_suffix);
+    }
+
+    if line2_text.is_empty() {
+        vec![Line::from(line1_text)]
+    } else {
+        vec![Line::from(line1_text), Line::from(line2_text)]
     }
 }
 
@@ -337,20 +462,47 @@ fn draw_form(
         f.render_widget(search, chunks[3]);
     }
 
-    // Help text
-    let help_text = if state.editing {
-        if state.showing_suggestions {
-            "↑/↓: select | Tab/Enter: accept | Esc: cancel | Type $VAR for env vars"
-        } else {
-            "ESC/Enter: finish editing | Type $VAR for env vars"
-        }
-    } else if state.search_mode {
-        "Type to search | Enter: select | Esc: clear"
-    } else {
-        "↑/↓: nav | Ctrl+↑/↓: scroll | Enter: edit | /: search | 1/2/3: tabs | Ctrl+X: clear | Ctrl+E: exec | Ctrl+P: preview | q: cancel"
-    };
-    let help = Paragraph::new(help_text).style(theme.help);
+    // Help text - render with dynamic wrapping
+    let help_lines = build_help_lines(state, chunks[4].width as usize);
+    let help = Paragraph::new(help_lines).style(theme.help);
     f.render_widget(help, chunks[4]);
+
+    // Show help sheet popup when requested
+    if state.showing_help {
+        let area = centered_rect(70, 60, f.area());
+        f.render_widget(Clear, area);
+
+        let help_items = vec![
+            ("↑/↓ or j/k", "Navigate fields"),
+            ("PgUp/PgDn", "Page navigation"),
+            ("Home/End", "Jump to top/bottom"),
+            ("Enter", "Edit field / Toggle bool / Cycle enum"),
+            ("Tab/Shift+Tab", "Next/previous field"),
+            ("Ctrl+↑/↓", "Scroll description"),
+            ("/", "Search by flag name"),
+            ("Ctrl+/", "Search including descriptions"),
+            ("1/2/3", "Switch to Basic/Advanced/Frequent tab"),
+            ("`", "Cycle through tabs"),
+            ("Ctrl+X", "Clear all values"),
+            ("Ctrl+E", "Execute command"),
+            ("Ctrl+P", "Preview command"),
+            ("q/Esc", "Cancel"),
+        ];
+
+        let items: Vec<ListItem> = help_items
+            .iter()
+            .map(|(key, desc)| {
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!("{:15}", key), Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(*desc),
+                ]))
+            })
+            .collect();
+
+        let list = List::new(items)
+            .block(Block::default().title("Help (press any key to close)").borders(Borders::ALL));
+        f.render_widget(list, area);
+    }
 
     // Show description popup when field is selected (but not when showing suggestions)
     if !state.showing_suggestions {
