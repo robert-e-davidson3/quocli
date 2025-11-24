@@ -19,6 +19,55 @@ use ratatui::{
 use std::collections::HashMap;
 use std::io;
 
+// UI layout constants
+/// Number of items to scroll for page up/down
+const PAGE_SIZE: usize = 10;
+
+/// Width of the suggestion popup in characters
+const SUGGESTION_POPUP_WIDTH: u16 = 50;
+
+/// Maximum height of the suggestion popup
+const SUGGESTION_MAX_HEIGHT: u16 = 15;
+
+/// Vertical position percentage for suggestion popup
+const POPUP_VERTICAL_POSITION_PERCENT: u16 = 40;
+
+/// Horizontal position percentage for suggestion popup
+const POPUP_HORIZONTAL_POSITION_PERCENT: u16 = 25;
+
+/// Width percentage for description popup
+const DESCRIPTION_POPUP_X_PERCENT: u16 = 60;
+
+/// Height percentage for description popup
+const DESCRIPTION_POPUP_Y_PERCENT: u16 = 20;
+
+/// Width percentage for help sheet popup
+const HELP_SHEET_X_PERCENT: u16 = 70;
+
+/// Height percentage for help sheet popup
+const HELP_SHEET_Y_PERCENT: u16 = 60;
+
+/// Width percentage for confirmation dialog
+const CONFIRM_DIALOG_X_PERCENT: u16 = 70;
+
+/// Height percentage for confirmation dialog
+const CONFIRM_DIALOG_Y_PERCENT: u16 = 50;
+
+/// Percentage of terminal height for description popup
+const DESCRIPTION_POPUP_HEIGHT_FRACTION: f32 = 0.20;
+
+/// Estimated characters per line for scroll calculation
+const ESTIMATED_CHARS_PER_LINE: u16 = 50;
+
+/// Maximum display length for environment variable values
+const ENV_VAR_VALUE_MAX_DISPLAY: usize = 30;
+
+/// Length at which to truncate environment variable values (for "..." suffix)
+const ENV_VAR_VALUE_TRUNCATE_AT: usize = 27;
+
+/// Default terminal height when size cannot be determined
+const DEFAULT_TERMINAL_HEIGHT: u16 = 24;
+
 /// Result of running the form
 #[derive(Debug)]
 pub enum FormResult {
@@ -98,7 +147,7 @@ fn run_form_loop(
         // Handle mouse events for description scrolling
         if let Event::Mouse(mouse) = event {
             // Only scroll if description is shown (not editing, not showing suggestions)
-            if !state.editing && !state.showing_suggestions {
+            if !state.editing && !state.showing_suggestions() {
                 if let Some(field) = state.current_field() {
                     if !field.description.is_empty() {
                         // Estimate max scroll based on description length
@@ -118,7 +167,7 @@ fn run_form_loop(
 
         if let Event::Key(key) = event {
             if state.editing {
-                if state.showing_suggestions {
+                if state.showing_suggestions() {
                     // Handle suggestion navigation
                     match key.code {
                         KeyCode::Esc => state.cancel_suggestions(),
@@ -153,7 +202,7 @@ fn run_form_loop(
                         _ => {}
                     }
                 }
-            } else if state.search_mode {
+            } else if state.search_mode() {
                 // Search mode key handling
                 match key.code {
                     KeyCode::Esc => state.clear_search(),
@@ -175,7 +224,7 @@ fn run_form_loop(
             } else {
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => {
-                        if !state.search_query.is_empty() {
+                        if !state.search_query().is_empty() {
                             state.clear_search();
                         } else {
                             return Ok(FormResult::Cancel);
@@ -201,7 +250,7 @@ fn run_form_loop(
                     KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         if let Some(field) = state.current_field() {
                             if !field.description.is_empty() {
-                                let term_height = terminal.size().map(|s| s.height).unwrap_or(24);
+                                let term_height = terminal.size().map(|s| s.height).unwrap_or(DEFAULT_TERMINAL_HEIGHT);
                                 let max_scroll = estimate_max_scroll(&field.description, term_height);
                                 state.scroll_description_down(max_scroll);
                             }
@@ -219,8 +268,8 @@ fn run_form_loop(
                     KeyCode::Char('3') => state.set_tab(OptionTab::Frequent),
                     KeyCode::Up | KeyCode::Char('k') => state.move_up(),
                     KeyCode::Down | KeyCode::Char('j') => state.move_down(),
-                    KeyCode::PageUp => state.page_up(10),
-                    KeyCode::PageDown => state.page_down(10),
+                    KeyCode::PageUp => state.page_up(PAGE_SIZE),
+                    KeyCode::PageDown => state.page_down(PAGE_SIZE),
                     KeyCode::Home => state.move_to_top(),
                     KeyCode::End => state.move_to_bottom(),
                     KeyCode::Enter => {
@@ -244,7 +293,7 @@ fn run_form_loop(
 /// Build help text lines with proper wrapping
 fn build_help_lines(state: &FormState, width: usize) -> Vec<Line<'static>> {
     let commands: Vec<(&str, &str)> = if state.editing {
-        if state.showing_suggestions {
+        if state.showing_suggestions() {
             vec![
                 ("↑/↓", "select"),
                 ("Tab/Enter", "accept"),
@@ -256,7 +305,7 @@ fn build_help_lines(state: &FormState, width: usize) -> Vec<Line<'static>> {
                 ("$VAR", "env vars"),
             ]
         }
-    } else if state.search_mode {
+    } else if state.search_mode() {
         vec![
             ("Type", "search"),
             ("↑/↓", "nav"),
@@ -288,7 +337,7 @@ fn build_help_lines(state: &FormState, width: usize) -> Vec<Line<'static>> {
     let one_line = formatted.join(separator);
 
     // For non-editing mode, we may need to show "?: help"
-    let help_suffix = if !state.editing && !state.search_mode { " | ?: help" } else { "" };
+    let help_suffix = if !state.editing && !state.search_mode() { " | ?: help" } else { "" };
 
     if one_line.len() + help_suffix.len() <= width {
         return vec![Line::from(format!("{}{}", one_line, help_suffix))];
@@ -325,7 +374,7 @@ fn build_help_lines(state: &FormState, width: usize) -> Vec<Line<'static>> {
                 current_len += sep_len + cmd_len;
             } else {
                 // Would need a third line - truncate and add ?: help
-                if !state.editing && !state.search_mode {
+                if !state.editing && !state.search_mode() {
                     // Add ?: help at the end of line 1
                     let line1_text = line1.join(separator);
                     return vec![Line::from(format!("{} | ?: help", line1_text))];
@@ -342,7 +391,7 @@ fn build_help_lines(state: &FormState, width: usize) -> Vec<Line<'static>> {
     let mut line2_text = line2.join(separator);
 
     // Add help suffix to line 2 if room and in normal mode
-    if !state.editing && !state.search_mode && line2_text.len() + help_suffix.len() <= target_len {
+    if !state.editing && !state.search_mode() && line2_text.len() + help_suffix.len() <= target_len {
         line2_text.push_str(help_suffix);
     }
 
@@ -353,29 +402,8 @@ fn build_help_lines(state: &FormState, width: usize) -> Vec<Line<'static>> {
     }
 }
 
-fn draw_form(
-    f: &mut Frame,
-    state: &FormState,
-    spec: &CommandSpec,
-    theme: &Theme,
-    config: &Config,
-) {
-    // Add search bar height when in search mode
-    let search_height = if state.search_mode || !state.search_query.is_empty() { 3 } else { 0 };
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .margin(1)
-        .constraints([
-            Constraint::Length(3),              // Header
-            Constraint::Min(10),                // Form fields
-            Constraint::Length(5),              // Command preview
-            Constraint::Length(search_height),  // Search bar
-            Constraint::Length(2),              // Help
-        ])
-        .split(f.area());
-
-    // Header
+/// Render the header section showing command name and danger level
+fn render_header(f: &mut Frame, area: Rect, spec: &CommandSpec, theme: &Theme) {
     let header = Paragraph::new(vec![
         Line::from(vec![
             Span::styled(&spec.command, theme.header),
@@ -392,9 +420,11 @@ fn draw_form(
         )),
     ])
     .block(Block::default().borders(Borders::BOTTOM));
-    f.render_widget(header, chunks[0]);
+    f.render_widget(header, area);
+}
 
-    // Form fields - show only filtered results
+/// Render the form fields list
+fn render_fields_list(f: &mut Frame, area: Rect, state: &FormState, theme: &Theme) {
     let visible = state.visible_fields();
     let items: Vec<ListItem> = visible
         .iter()
@@ -429,7 +459,7 @@ fn draw_form(
         OptionTab::Advanced => "Advanced",
         OptionTab::Frequent => "Frequent",
     };
-    let title = if state.search_query.is_empty() {
+    let title = if state.search_query().is_empty() {
         format!("[{}] Options ({})", tab_name, visible.len())
     } else {
         format!("[{}] Options ({}/{})", tab_name, visible.len(), state.fields.len())
@@ -439,141 +469,189 @@ fn draw_form(
         .block(Block::default().title(title).borders(Borders::ALL))
         .highlight_style(Style::default().add_modifier(Modifier::BOLD));
 
-    f.render_widget(list, chunks[1]);
+    f.render_widget(list, area);
+}
 
-    // Command preview
+/// Render the command preview section
+fn render_preview(f: &mut Frame, area: Rect, spec: &CommandSpec, state: &FormState, theme: &Theme) {
+    let command_line = build_preview(spec, state);
+    let preview = Paragraph::new(command_line)
+        .style(theme.preview)
+        .block(Block::default().title("Command Preview").borders(Borders::ALL))
+        .wrap(Wrap { trim: false });
+    f.render_widget(preview, area);
+}
+
+/// Render the search bar
+fn render_search_bar(f: &mut Frame, area: Rect, state: &FormState, theme: &Theme) {
+    let search_indicator = if state.include_description() { "Search (+ desc): " } else { "Search: " };
+    let cursor = if state.search_mode() { "_" } else { "" };
+    let search_text = format!("{}{}{}", search_indicator, state.search_query(), cursor);
+    let search = Paragraph::new(search_text)
+        .style(if state.search_mode() { theme.selected } else { theme.normal })
+        .block(Block::default().borders(Borders::ALL));
+    f.render_widget(search, area);
+}
+
+/// Render the description popup for the current field
+fn render_description_popup(f: &mut Frame, state: &FormState) {
+    if let Some(field) = state.current_field() {
+        if !field.description.is_empty() {
+            let area = centered_rect(DESCRIPTION_POPUP_X_PERCENT, DESCRIPTION_POPUP_Y_PERCENT, f.area());
+            f.render_widget(Clear, area);
+
+            // Calculate scroll info
+            let (_, can_scroll_up, can_scroll_down) =
+                calc_scroll_info(&field.description, area, state.description_scroll);
+
+            // Build scroll indicator for title
+            let scroll_indicator = match (can_scroll_up, can_scroll_down) {
+                (true, true) => " ↑↓",
+                (true, false) => " ↑",
+                (false, true) => " ↓",
+                (false, false) => "",
+            };
+            let title = format!("Description{}", scroll_indicator);
+
+            let desc = Paragraph::new(field.description.clone())
+                .block(Block::default().title(title).borders(Borders::ALL))
+                .wrap(Wrap { trim: true })
+                .scroll((state.description_scroll, 0));
+            f.render_widget(desc, area);
+        }
+    }
+}
+
+/// Render the environment variable suggestions popup
+fn render_suggestions_popup(f: &mut Frame, state: &FormState, theme: &Theme) {
+    let items: Vec<ListItem> = state
+        .env_suggestions()
+        .iter()
+        .enumerate()
+        .map(|(i, (name, value))| {
+            let style = if i == state.selected_suggestion() {
+                theme.selected
+            } else {
+                theme.normal
+            };
+            // Truncate value if too long
+            let display_value = if value.len() > ENV_VAR_VALUE_MAX_DISPLAY {
+                format!("{}...", &value[..ENV_VAR_VALUE_TRUNCATE_AT])
+            } else {
+                value.clone()
+            };
+            ListItem::new(Line::from(Span::styled(
+                format!("${} = {}", name, display_value),
+                style,
+            )))
+        })
+        .collect();
+
+    // Position the popup near the current field
+    let area = suggestion_rect(SUGGESTION_POPUP_WIDTH, state.env_suggestions().len() as u16 + 2, f.area());
+    f.render_widget(Clear, area);
+    let list = List::new(items)
+        .block(Block::default().title("Env Variables (Tab/Enter to select)").borders(Borders::ALL));
+    f.render_widget(list, area);
+}
+
+/// Render the help sheet popup
+fn render_help_sheet(f: &mut Frame) {
+    let area = centered_rect(HELP_SHEET_X_PERCENT, HELP_SHEET_Y_PERCENT, f.area());
+    f.render_widget(Clear, area);
+
+    let help_items = vec![
+        ("↑/↓ or j/k", "Navigate fields"),
+        ("PgUp/PgDn", "Page navigation"),
+        ("Home/End", "Jump to top/bottom"),
+        ("Enter", "Edit field / Toggle bool / Cycle enum"),
+        ("Tab/Shift+Tab", "Next/previous field"),
+        ("Ctrl+↑/↓", "Scroll description"),
+        ("/", "Search by flag name"),
+        ("Ctrl+/", "Search including descriptions"),
+        ("1/2/3", "Switch to Basic/Advanced/Frequent tab"),
+        ("`", "Cycle through tabs"),
+        ("Ctrl+X", "Clear all values"),
+        ("Ctrl+E", "Execute command"),
+        ("Ctrl+P", "Preview command"),
+        ("q/Esc", "Cancel"),
+    ];
+
+    let items: Vec<ListItem> = help_items
+        .iter()
+        .map(|(key, desc)| {
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("{:15}", key), Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(*desc),
+            ]))
+        })
+        .collect();
+
+    let list = List::new(items)
+        .block(Block::default().title("Help (press any key to close)").borders(Borders::ALL));
+    f.render_widget(list, area);
+}
+
+fn draw_form(
+    f: &mut Frame,
+    state: &FormState,
+    spec: &CommandSpec,
+    theme: &Theme,
+    config: &Config,
+) {
+    // Add search bar height when in search mode
+    let search_height = if state.search_mode() || !state.search_query().is_empty() { 3 } else { 0 };
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(1)
+        .constraints([
+            Constraint::Length(3),              // Header
+            Constraint::Min(10),                // Form fields
+            Constraint::Length(5),              // Command preview
+            Constraint::Length(search_height),  // Search bar
+            Constraint::Length(2),              // Help
+        ])
+        .split(f.area());
+
+    // Render main UI components
+    render_header(f, chunks[0], spec, theme);
+    render_fields_list(f, chunks[1], state, theme);
+
     if config.ui.preview_command {
-        let command_line = build_preview(spec, state);
-        let preview = Paragraph::new(command_line)
-            .style(theme.preview)
-            .block(Block::default().title("Command Preview").borders(Borders::ALL))
-            .wrap(Wrap { trim: false });
-        f.render_widget(preview, chunks[2]);
+        render_preview(f, chunks[2], spec, state, theme);
     }
 
-    // Search bar
-    if state.search_mode || !state.search_query.is_empty() {
-        let search_indicator = if state.include_description { "Search (+ desc): " } else { "Search: " };
-        let cursor = if state.search_mode { "_" } else { "" };
-        let search_text = format!("{}{}{}", search_indicator, state.search_query, cursor);
-        let search = Paragraph::new(search_text)
-            .style(if state.search_mode { theme.selected } else { theme.normal })
-            .block(Block::default().borders(Borders::ALL));
-        f.render_widget(search, chunks[3]);
+    if state.search_mode() || !state.search_query().is_empty() {
+        render_search_bar(f, chunks[3], state, theme);
     }
 
-    // Help text - render with dynamic wrapping
+    // Help text
     let help_lines = build_help_lines(state, chunks[4].width as usize);
     let help = Paragraph::new(help_lines).style(theme.help);
     f.render_widget(help, chunks[4]);
 
-    // Show description popup when field is selected (but not when showing suggestions or help)
-    if !state.showing_suggestions && !state.showing_help {
-        if let Some(field) = state.current_field() {
-            if !field.description.is_empty() {
-                let area = centered_rect(60, 20, f.area());
-                f.render_widget(Clear, area);
-
-                // Calculate scroll info
-                let (_, can_scroll_up, can_scroll_down) =
-                    calc_scroll_info(&field.description, area, state.description_scroll);
-
-                // Build scroll indicator for title
-                let scroll_indicator = match (can_scroll_up, can_scroll_down) {
-                    (true, true) => " ↑↓",
-                    (true, false) => " ↑",
-                    (false, true) => " ↓",
-                    (false, false) => "",
-                };
-                let title = format!("Description{}", scroll_indicator);
-
-                let desc = Paragraph::new(field.description.clone())
-                    .block(Block::default().title(title).borders(Borders::ALL))
-                    .wrap(Wrap { trim: true })
-                    .scroll((state.description_scroll, 0));
-                f.render_widget(desc, area);
-            }
-        }
+    // Render popups (order matters - later ones render on top)
+    if !state.showing_suggestions() && !state.showing_help {
+        render_description_popup(f, state);
     }
 
-    // Show env var suggestions popup when available
-    if state.showing_suggestions && !state.env_suggestions.is_empty() {
-        let items: Vec<ListItem> = state
-            .env_suggestions
-            .iter()
-            .enumerate()
-            .map(|(i, (name, value))| {
-                let style = if i == state.selected_suggestion {
-                    theme.selected
-                } else {
-                    theme.normal
-                };
-                // Truncate value if too long
-                let display_value = if value.len() > 30 {
-                    format!("{}...", &value[..27])
-                } else {
-                    value.clone()
-                };
-                ListItem::new(Line::from(Span::styled(
-                    format!("${} = {}", name, display_value),
-                    style,
-                )))
-            })
-            .collect();
-
-        // Position the popup near the current field
-        let area = suggestion_rect(50, state.env_suggestions.len() as u16 + 2, f.area());
-        f.render_widget(Clear, area);
-        let list = List::new(items)
-            .block(Block::default().title("Env Variables (Tab/Enter to select)").borders(Borders::ALL));
-        f.render_widget(list, area);
+    if state.showing_suggestions() && !state.env_suggestions().is_empty() {
+        render_suggestions_popup(f, state, theme);
     }
 
-    // Show help sheet popup when requested (render last to be on top)
     if state.showing_help {
-        let area = centered_rect(70, 60, f.area());
-        f.render_widget(Clear, area);
-
-        let help_items = vec![
-            ("↑/↓ or j/k", "Navigate fields"),
-            ("PgUp/PgDn", "Page navigation"),
-            ("Home/End", "Jump to top/bottom"),
-            ("Enter", "Edit field / Toggle bool / Cycle enum"),
-            ("Tab/Shift+Tab", "Next/previous field"),
-            ("Ctrl+↑/↓", "Scroll description"),
-            ("/", "Search by flag name"),
-            ("Ctrl+/", "Search including descriptions"),
-            ("1/2/3", "Switch to Basic/Advanced/Frequent tab"),
-            ("`", "Cycle through tabs"),
-            ("Ctrl+X", "Clear all values"),
-            ("Ctrl+E", "Execute command"),
-            ("Ctrl+P", "Preview command"),
-            ("q/Esc", "Cancel"),
-        ];
-
-        let items: Vec<ListItem> = help_items
-            .iter()
-            .map(|(key, desc)| {
-                ListItem::new(Line::from(vec![
-                    Span::styled(format!("{:15}", key), Style::default().add_modifier(Modifier::BOLD)),
-                    Span::raw(*desc),
-                ]))
-            })
-            .collect();
-
-        let list = List::new(items)
-            .block(Block::default().title("Help (press any key to close)").borders(Borders::ALL));
-        f.render_widget(list, area);
+        render_help_sheet(f);
     }
 }
 
 /// Helper function to create a rect for suggestions popup
 fn suggestion_rect(width: u16, height: u16, r: Rect) -> Rect {
-    let height = height.min(15); // Max height of 15
+    let height = height.min(SUGGESTION_MAX_HEIGHT);
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage(40),
+            Constraint::Percentage(POPUP_VERTICAL_POSITION_PERCENT),
             Constraint::Length(height),
             Constraint::Min(0),
         ])
@@ -582,7 +660,7 @@ fn suggestion_rect(width: u16, height: u16, r: Rect) -> Rect {
     Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(25),
+            Constraint::Percentage(POPUP_HORIZONTAL_POSITION_PERCENT),
             Constraint::Length(width),
             Constraint::Min(0),
         ])
@@ -674,7 +752,7 @@ fn run_confirm_dialog(
 ) -> Result<bool> {
     loop {
         terminal.draw(|f| {
-            let area = centered_rect(70, 50, f.area());
+            let area = centered_rect(CONFIRM_DIALOG_X_PERCENT, CONFIRM_DIALOG_Y_PERCENT, f.area());
             f.render_widget(Clear, area);
 
             let theme = Theme::dark();
@@ -734,17 +812,16 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 
 /// Estimate the maximum scroll offset for a description
 fn estimate_max_scroll(description: &str, terminal_height: u16) -> u16 {
-    // Popup is 20% of terminal height, minus 2 for borders
-    let popup_height = (terminal_height as f32 * 0.20) as u16;
+    // Popup height based on terminal height, minus 2 for borders
+    let popup_height = (terminal_height as f32 * DESCRIPTION_POPUP_HEIGHT_FRACTION) as u16;
     let content_height = popup_height.saturating_sub(2);
 
     if content_height == 0 {
         return 0;
     }
 
-    // Estimate wrapped lines: assume ~60 chars per line (60% of terminal width)
-    let chars_per_line = 50;
-    let estimated_lines = (description.len() as u16 / chars_per_line) + 1;
+    // Estimate wrapped lines based on average characters per line
+    let estimated_lines = (description.len() as u16 / ESTIMATED_CHARS_PER_LINE) + 1;
 
     // Max scroll is the number of lines that don't fit
     estimated_lines.saturating_sub(content_height)

@@ -10,6 +10,84 @@ pub enum OptionTab {
     Frequent,
 }
 
+/// Search state for filtering fields
+#[derive(Debug, Default)]
+pub struct SearchState {
+    pub active: bool,
+    pub query: String,
+    pub include_description: bool,
+}
+
+impl SearchState {
+    pub fn start(&mut self, include_description: bool) {
+        self.active = true;
+        self.query.clear();
+        self.include_description = include_description;
+    }
+
+    pub fn stop(&mut self) {
+        self.active = false;
+    }
+
+    pub fn clear(&mut self) {
+        self.query.clear();
+        self.active = false;
+    }
+
+    pub fn insert_char(&mut self, c: char) {
+        self.query.push(c);
+    }
+
+    pub fn delete_char(&mut self) {
+        self.query.pop();
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.query.is_empty()
+    }
+}
+
+/// Environment variable suggestion state
+#[derive(Debug, Default)]
+pub struct SuggestionState {
+    pub showing: bool,
+    pub items: Vec<(String, String)>, // (name, value)
+    pub selected: usize,
+}
+
+impl SuggestionState {
+    pub fn show(&mut self, suggestions: Vec<(String, String)>) {
+        self.items = suggestions;
+        self.showing = true;
+        self.selected = 0;
+    }
+
+    pub fn hide(&mut self) {
+        self.showing = false;
+        self.items.clear();
+    }
+
+    pub fn next(&mut self) {
+        if !self.items.is_empty() {
+            self.selected = (self.selected + 1) % self.items.len();
+        }
+    }
+
+    pub fn prev(&mut self) {
+        if !self.items.is_empty() {
+            if self.selected == 0 {
+                self.selected = self.items.len() - 1;
+            } else {
+                self.selected -= 1;
+            }
+        }
+    }
+
+    pub fn selected_name(&self) -> Option<&str> {
+        self.items.get(self.selected).map(|(name, _)| name.as_str())
+    }
+}
+
 /// Form field representing a single input
 #[derive(Debug, Clone)]
 pub struct FormField {
@@ -86,28 +164,55 @@ impl FormField {
 
 /// Form state
 pub struct FormState {
+    // Core field state
     pub fields: Vec<FormField>,
     pub selected: usize,
     pub editing: bool,
     pub cursor_pos: usize,
-    // Search state
-    pub search_mode: bool,
-    pub search_query: String,
     pub filtered_indices: Vec<usize>,
-    pub include_description: bool,
+
+    // Sub-states for better organization
+    pub search: SearchState,
+    pub suggestions: SuggestionState,
+
     // Tab state
     pub current_tab: OptionTab,
     pub basic_indices: Vec<usize>,    // indices of basic-level fields
     pub advanced_indices: Vec<usize>, // indices of advanced-level fields
     pub frequent_indices: Vec<usize>, // indices of fields that have cached values
-    // Env var suggestion state
-    pub showing_suggestions: bool,
-    pub env_suggestions: Vec<(String, String)>, // (name, value)
-    pub selected_suggestion: usize,
+
     // Description scroll state
     pub description_scroll: u16,
+
     // Help sheet state
     pub showing_help: bool,
+}
+
+// Backwards-compatible accessors for search state
+impl FormState {
+    pub fn search_mode(&self) -> bool {
+        self.search.active
+    }
+
+    pub fn search_query(&self) -> &str {
+        &self.search.query
+    }
+
+    pub fn include_description(&self) -> bool {
+        self.search.include_description
+    }
+
+    pub fn showing_suggestions(&self) -> bool {
+        self.suggestions.showing
+    }
+
+    pub fn env_suggestions(&self) -> &[(String, String)] {
+        &self.suggestions.items
+    }
+
+    pub fn selected_suggestion(&self) -> usize {
+        self.suggestions.selected
+    }
 }
 
 impl FormState {
@@ -139,17 +244,13 @@ impl FormState {
             selected: 0,
             editing: false,
             cursor_pos: 0,
-            search_mode: false,
-            search_query: String::new(),
             filtered_indices,
-            include_description: false,
+            search: SearchState::default(),
+            suggestions: SuggestionState::default(),
             current_tab: OptionTab::Basic,
             basic_indices,
             advanced_indices,
             frequent_indices: Vec::new(),
-            showing_suggestions: false,
-            env_suggestions: Vec::new(),
-            selected_suggestion: 0,
             description_scroll: 0,
             showing_help: false,
         }
@@ -198,7 +299,7 @@ impl FormState {
         }
 
         // Re-apply search filter if there's an active search
-        if !self.search_query.is_empty() {
+        if !self.search.is_empty() {
             self.update_filter();
         } else {
             // Ensure selection is valid
@@ -210,43 +311,40 @@ impl FormState {
 
     /// Start search mode
     pub fn start_search(&mut self, include_description: bool) {
-        self.search_mode = true;
-        self.search_query.clear();
-        self.include_description = include_description;
+        self.search.start(include_description);
         self.update_filter();
     }
 
     /// Stop search mode
     pub fn stop_search(&mut self) {
-        self.search_mode = false;
+        self.search.stop();
     }
 
     /// Clear search and show all fields
     pub fn clear_search(&mut self) {
-        self.search_query.clear();
+        self.search.clear();
         self.filtered_indices = (0..self.fields.len()).collect();
-        self.search_mode = false;
         self.selected = 0;
     }
 
     /// Add character to search query
     pub fn search_insert_char(&mut self, c: char) {
-        self.search_query.push(c);
+        self.search.insert_char(c);
         self.update_filter();
     }
 
     /// Delete character from search query
     pub fn search_delete_char(&mut self) {
-        self.search_query.pop();
+        self.search.delete_char();
         self.update_filter();
     }
 
     /// Update filtered indices based on search query
     pub fn update_filter(&mut self) {
-        if self.search_query.is_empty() {
+        if self.search.is_empty() {
             self.filtered_indices = (0..self.fields.len()).collect();
         } else {
-            let query = self.search_query.to_lowercase();
+            let query = self.search.query.to_lowercase();
 
             // Score and sort results - prefer exact flag matches
             let mut scored: Vec<(usize, i32)> = self.fields
@@ -273,7 +371,7 @@ impl FormState {
                     }
 
                     // Description contains query (if enabled)
-                    if self.include_description && desc_lower.contains(&query) {
+                    if self.search.include_description && desc_lower.contains(&query) {
                         return Some((i, 10));
                     }
 
@@ -527,8 +625,7 @@ impl FormState {
                     // Get prefix (text after $, could be empty)
                     let prefix = if after_dollar.contains(|c: char| !c.is_alphanumeric() && c != '_') {
                         // There's a non-var char after the $, not in env var mode
-                        self.showing_suggestions = false;
-                        self.env_suggestions.clear();
+                        self.suggestions.hide();
                         return;
                     } else {
                         after_dollar
@@ -537,12 +634,9 @@ impl FormState {
                     // Get suggestions
                     let suggestions = get_env_suggestions(prefix);
                     if !suggestions.is_empty() {
-                        self.env_suggestions = suggestions;
-                        self.showing_suggestions = true;
-                        self.selected_suggestion = 0;
+                        self.suggestions.show(suggestions);
                     } else {
-                        self.showing_suggestions = false;
-                        self.env_suggestions.clear();
+                        self.suggestions.hide();
                     }
                     return;
                 }
@@ -550,51 +644,42 @@ impl FormState {
         }
 
         // Not in suggestion mode
-        self.showing_suggestions = false;
-        self.env_suggestions.clear();
+        self.suggestions.hide();
     }
 
     /// Move to next suggestion
     pub fn next_suggestion(&mut self) {
-        if !self.env_suggestions.is_empty() {
-            self.selected_suggestion = (self.selected_suggestion + 1) % self.env_suggestions.len();
-        }
+        self.suggestions.next();
     }
 
     /// Move to previous suggestion
     pub fn prev_suggestion(&mut self) {
-        if !self.env_suggestions.is_empty() {
-            if self.selected_suggestion == 0 {
-                self.selected_suggestion = self.env_suggestions.len() - 1;
-            } else {
-                self.selected_suggestion -= 1;
-            }
-        }
+        self.suggestions.prev();
     }
 
     /// Accept the currently selected suggestion
     pub fn accept_suggestion(&mut self) {
-        if self.showing_suggestions && !self.env_suggestions.is_empty() {
-            let var_name = self.env_suggestions[self.selected_suggestion].0.clone();
+        if self.suggestions.showing && !self.suggestions.items.is_empty() {
+            if let Some(var_name) = self.suggestions.selected_name() {
+                let var_name = var_name.to_string();
 
-            if let Some(field) = self.current_field_mut() {
-                // Find the last $ and replace everything after it with the var name
-                if let Some(dollar_pos) = field.value.rfind('$') {
-                    field.value.truncate(dollar_pos + 1);
-                    field.value.push_str(&var_name);
-                    self.cursor_pos = field.value.len();
+                if let Some(field) = self.current_field_mut() {
+                    // Find the last $ and replace everything after it with the var name
+                    if let Some(dollar_pos) = field.value.rfind('$') {
+                        field.value.truncate(dollar_pos + 1);
+                        field.value.push_str(&var_name);
+                        self.cursor_pos = field.value.len();
+                    }
                 }
             }
 
-            self.showing_suggestions = false;
-            self.env_suggestions.clear();
+            self.suggestions.hide();
         }
     }
 
     /// Cancel showing suggestions
     pub fn cancel_suggestions(&mut self) {
-        self.showing_suggestions = false;
-        self.env_suggestions.clear();
+        self.suggestions.hide();
     }
 
     /// Toggle help sheet visibility
@@ -971,7 +1056,7 @@ mod tests {
         let mut state = FormState::new(fields);
 
         state.start_search(false);
-        assert!(state.search_mode);
+        assert!(state.search.active);
 
         state.search_insert_char('v');
         state.search_insert_char('e');
@@ -999,10 +1084,10 @@ mod tests {
         state.search_insert_char('v');
         state.search_insert_char('e');
 
-        assert_eq!(state.search_query, "ve");
+        assert_eq!(state.search.query, "ve");
 
         state.search_delete_char();
-        assert_eq!(state.search_query, "v");
+        assert_eq!(state.search.query, "v");
     }
 
     #[test]
@@ -1084,28 +1169,28 @@ mod tests {
 
         let mut state = FormState::new(fields);
 
-        assert!(!state.showing_suggestions);
+        assert!(!state.suggestions.showing);
 
         // Manually set suggestions for testing
-        state.env_suggestions = vec![
+        state.suggestions.items = vec![
             ("HOME".to_string(), "/home/user".to_string()),
             ("HOST".to_string(), "localhost".to_string()),
         ];
-        state.showing_suggestions = true;
-        state.selected_suggestion = 0;
+        state.suggestions.showing = true;
+        state.suggestions.selected = 0;
 
         state.next_suggestion();
-        assert_eq!(state.selected_suggestion, 1);
+        assert_eq!(state.suggestions.selected, 1);
 
         state.next_suggestion();
-        assert_eq!(state.selected_suggestion, 0); // Wraps
+        assert_eq!(state.suggestions.selected, 0); // Wraps
 
         state.prev_suggestion();
-        assert_eq!(state.selected_suggestion, 1);
+        assert_eq!(state.suggestions.selected, 1);
 
         state.cancel_suggestions();
-        assert!(!state.showing_suggestions);
-        assert!(state.env_suggestions.is_empty());
+        assert!(!state.suggestions.showing);
+        assert!(state.suggestions.items.is_empty());
     }
 
     #[test]
@@ -1117,14 +1202,14 @@ mod tests {
         // Set up a scenario where user typed "$HO"
         state.fields[0].value = "$HO".to_string();
         state.cursor_pos = 3;
-        state.env_suggestions = vec![("HOME".to_string(), "/home/user".to_string())];
-        state.showing_suggestions = true;
-        state.selected_suggestion = 0;
+        state.suggestions.items = vec![("HOME".to_string(), "/home/user".to_string())];
+        state.suggestions.showing = true;
+        state.suggestions.selected = 0;
 
         state.accept_suggestion();
 
         assert_eq!(state.fields[0].value, "$HOME");
-        assert!(!state.showing_suggestions);
+        assert!(!state.suggestions.showing);
     }
 
     #[test]

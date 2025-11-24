@@ -2,6 +2,15 @@ use crate::QuocliError;
 use sha2::{Digest, Sha256};
 use std::process::Command;
 
+/// Minimum length for extended help text to be considered valid
+const MIN_EXTENDED_HELP_LENGTH: usize = 500;
+
+/// Minimum length for regular help text to be considered valid
+const MIN_HELP_TEXT_LENGTH: usize = 50;
+
+/// Minimum length for manpage text to be considered valid
+const MIN_MANPAGE_LENGTH: usize = 100;
+
 /// Combined help documentation for a command
 pub struct HelpDocumentation {
     /// Help text from --help or similar
@@ -52,7 +61,7 @@ fn get_help_text_only(command: &str, subcommands: &[String]) -> Result<String, Q
         }
         if let Ok(output) = try_command(command, &extended_args) {
             // Extended help should be substantial
-            if !output.is_empty() && output.len() > 500 {
+            if !output.is_empty() && output.len() > MIN_EXTENDED_HELP_LENGTH {
                 return Ok(output);
             }
         }
@@ -61,7 +70,7 @@ fn get_help_text_only(command: &str, subcommands: &[String]) -> Result<String, Q
     // Try --help
     args.push("--help");
     if let Ok(output) = try_command(command, &args) {
-        if !output.is_empty() && output.len() > 50 {
+        if !output.is_empty() && output.len() > MIN_HELP_TEXT_LENGTH {
             return Ok(output);
         }
     }
@@ -70,7 +79,7 @@ fn get_help_text_only(command: &str, subcommands: &[String]) -> Result<String, Q
     // Try -h
     args.push("-h");
     if let Ok(output) = try_command(command, &args) {
-        if !output.is_empty() && output.len() > 50 {
+        if !output.is_empty() && output.len() > MIN_HELP_TEXT_LENGTH {
             return Ok(output);
         }
     }
@@ -80,7 +89,7 @@ fn get_help_text_only(command: &str, subcommands: &[String]) -> Result<String, Q
     let mut help_args: Vec<&str> = vec!["help"];
     help_args.extend(subcommands.iter().map(|s| s.as_str()));
     if let Ok(output) = try_command(command, &help_args) {
-        if !output.is_empty() && output.len() > 50 {
+        if !output.is_empty() && output.len() > MIN_HELP_TEXT_LENGTH {
             return Ok(output);
         }
     }
@@ -104,7 +113,7 @@ fn get_manpage_text(command: &str, subcommands: &[String]) -> Result<String, Quo
 
     let text = String::from_utf8_lossy(&output.stdout).to_string();
 
-    if text.len() > 100 {
+    if text.len() > MIN_MANPAGE_LENGTH {
         Ok(text)
     } else {
         Err(QuocliError::NoHelpText(format!("man {}", man_command)))

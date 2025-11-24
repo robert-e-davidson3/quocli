@@ -225,33 +225,6 @@ impl Cache {
         Ok(())
     }
 
-    /// Log command execution to history
-    #[allow(dead_code)]
-    pub async fn log_execution(
-        &self,
-        command_name: &str,
-        args: &HashMap<String, String>,
-        success: bool,
-    ) -> Result<(), sqlx::Error> {
-        let now = current_timestamp();
-        let args_json = serde_json::to_string(args)
-            .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
-
-        sqlx::query(
-            r#"
-            INSERT INTO command_history (command_name, args_json, timestamp, success)
-            VALUES (?, ?, ?, ?)
-            "#,
-        )
-        .bind(command_name)
-        .bind(args_json)
-        .bind(now)
-        .bind(success)
-        .execute(&self.pool)
-        .await?;
-
-        Ok(())
-    }
 }
 
 fn current_timestamp() -> i64 {
@@ -557,32 +530,6 @@ mod tests {
 
         // Should not error on nonexistent command
         let result = cache.clear_values("nonexistent").await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_log_execution() {
-        let (cache, _temp) = create_test_cache().await;
-
-        let mut args = HashMap::new();
-        args.insert("--verbose".to_string(), "true".to_string());
-        args.insert("file".to_string(), "input.txt".to_string());
-
-        // Log successful execution
-        cache.log_execution("test", &args, true).await.unwrap();
-
-        // Log failed execution
-        cache.log_execution("test", &args, false).await.unwrap();
-
-        // We can't directly verify the history without raw SQL, but no error means success
-    }
-
-    #[tokio::test]
-    async fn test_log_execution_empty_args() {
-        let (cache, _temp) = create_test_cache().await;
-
-        let args = HashMap::new();
-        let result = cache.log_execution("test", &args, true).await;
         assert!(result.is_ok());
     }
 

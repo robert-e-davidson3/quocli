@@ -1,6 +1,6 @@
 use crate::llm::client::{async_trait, LlmClient};
 use crate::llm::prompt;
-use crate::parser::{ArgumentType, CommandOption, CommandSpec, DangerLevel, HelpDocumentation, PositionalArg};
+use crate::parser::{CommandOption, CommandSpec, DangerLevel, HelpDocumentation, PositionalArg};
 use crate::QuocliError;
 use futures::stream::{FuturesUnordered, StreamExt};
 use futures::future::BoxFuture;
@@ -11,6 +11,51 @@ use std::io::{self, Write};
 
 /// Maximum concurrent API requests to avoid rate limiting
 const MAX_CONCURRENT_REQUESTS: usize = 10;
+
+/// Retry delays in milliseconds for exponential backoff
+const RETRY_DELAYS_MS: &[u64] = &[2000, 4000, 8000, 16000];
+
+/// HTTP status codes for retry logic
+const HTTP_STATUS_OVERLOADED: u16 = 529;
+const HTTP_STATUS_SERVICE_UNAVAILABLE: u16 = 503;
+
+/// Fast model for detail extraction (cheaper, faster for simple tasks)
+const HAIKU_MODEL: &str = "claude-haiku-4-5-20251001";
+
+/// Delay in milliseconds to ensure cache is ready after first request
+const CACHE_WARMUP_DELAY_MS: u64 = 500;
+
+/// API endpoint URL
+const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
+
+/// Log retry attempt and sleep for the specified delay
+async fn retry_delay(attempt: usize, reason: &str) {
+    let delay = RETRY_DELAYS_MS[attempt];
+    tracing::warn!("{}, retrying in {}ms (attempt {}/{})",
+        reason, delay, attempt + 1, RETRY_DELAYS_MS.len());
+    tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
+}
+
+/// Check if a request error is retryable (connection/network errors)
+fn is_retryable_error(error: &reqwest::Error) -> bool {
+    error.is_connect() || error.is_request()
+}
+
+/// Check if an HTTP status code is retryable (overloaded/unavailable)
+fn is_retryable_status(status: reqwest::StatusCode) -> bool {
+    status.as_u16() == HTTP_STATUS_OVERLOADED || status.as_u16() == HTTP_STATUS_SERVICE_UNAVAILABLE
+}
+
+/// Extract text content from an Anthropic API response
+fn extract_response_text(response: AnthropicResponse) -> Result<String, QuocliError> {
+    let text = response
+        .content
+        .first()
+        .map(|c| c.text.clone())
+        .ok_or_else(|| QuocliError::Llm("Empty response from API".to_string()))?;
+
+    Ok(strip_markdown_code_blocks(&text))
+}
 
 pub struct AnthropicClient {
     api_key: String,
@@ -41,12 +86,11 @@ impl AnthropicClient {
         };
 
         let mut last_error = None;
-        let retry_delays = [2000, 4000, 8000, 16000]; // milliseconds
 
-        for attempt in 0..=retry_delays.len() {
+        for attempt in 0..=RETRY_DELAYS_MS.len() {
             let result = self
                 .client
-                .post("https://api.anthropic.com/v1/messages")
+                .post(ANTHROPIC_API_URL)
                 .header("x-api-key", &self.api_key)
                 .header("anthropic-version", "2023-06-01")
                 .header("content-type", "application/json")
@@ -66,24 +110,13 @@ impl AnthropicClient {
                     }
 
                     let api_response: AnthropicResponse = response.json().await?;
-
-                    let text = api_response
-                        .content
-                        .first()
-                        .map(|c| c.text.clone())
-                        .ok_or_else(|| QuocliError::Llm("Empty response from API".to_string()))?;
-
-                    return Ok(strip_markdown_code_blocks(&text));
+                    return extract_response_text(api_response);
                 }
                 Err(e) => {
-                    // Only retry on connection/network errors
-                    if e.is_connect() || e.is_request() {
+                    if is_retryable_error(&e) {
                         last_error = Some(e);
-                        if attempt < retry_delays.len() {
-                            let delay = retry_delays[attempt];
-                            tracing::warn!("Connection error, retrying in {}ms (attempt {}/{})",
-                                delay, attempt + 1, retry_delays.len());
-                            tokio::time::sleep(tokio::time::Duration::from_millis(delay as u64)).await;
+                        if attempt < RETRY_DELAYS_MS.len() {
+                            retry_delay(attempt, "Connection error").await;
                             continue;
                         }
                     } else {
@@ -130,12 +163,10 @@ impl AnthropicClient {
             }],
         };
 
-        let retry_delays = [2000, 4000, 8000, 16000];
-
-        for attempt in 0..=retry_delays.len() {
+        for attempt in 0..=RETRY_DELAYS_MS.len() {
             let result = self
                 .client
-                .post("https://api.anthropic.com/v1/messages")
+                .post(ANTHROPIC_API_URL)
                 .header("x-api-key", &self.api_key)
                 .header("anthropic-version", "2023-06-01")
                 .header("anthropic-beta", "prompt-caching-2024-07-31")
@@ -148,19 +179,16 @@ impl AnthropicClient {
                 Ok(response) => {
                     let status = response.status();
 
-                    // Retry on 529 (Overloaded) or 503 (Service Unavailable)
-                    if status.as_u16() == 529 || status.as_u16() == 503 {
-                        if attempt < retry_delays.len() {
-                            let delay = retry_delays[attempt];
-                            tracing::warn!("API overloaded ({}), retrying in {}ms (attempt {}/{})",
-                                status, delay, attempt + 1, retry_delays.len());
-                            tokio::time::sleep(tokio::time::Duration::from_millis(delay as u64)).await;
+                    // Retry on overloaded or service unavailable
+                    if is_retryable_status(status) {
+                        if attempt < RETRY_DELAYS_MS.len() {
+                            retry_delay(attempt, &format!("API overloaded ({})", status)).await;
                             continue;
                         } else {
                             let error_text = response.text().await.unwrap_or_default();
                             return Err(QuocliError::Llm(format!(
                                 "API overloaded after {} retries: {}",
-                                retry_delays.len(), error_text
+                                RETRY_DELAYS_MS.len(), error_text
                             )));
                         }
                     }
@@ -174,24 +202,12 @@ impl AnthropicClient {
                     }
 
                     let api_response: AnthropicResponse = response.json().await?;
-
-                    let text = api_response
-                        .content
-                        .first()
-                        .map(|c| c.text.clone())
-                        .ok_or_else(|| QuocliError::Llm("Empty response from API".to_string()))?;
-
-                    return Ok(strip_markdown_code_blocks(&text));
+                    return extract_response_text(api_response);
                 }
                 Err(e) => {
-                    if e.is_connect() || e.is_request() {
-                        if attempt < retry_delays.len() {
-                            let delay = retry_delays[attempt];
-                            tracing::warn!("Connection error, retrying in {}ms (attempt {}/{})",
-                                delay, attempt + 1, retry_delays.len());
-                            tokio::time::sleep(tokio::time::Duration::from_millis(delay as u64)).await;
-                            continue;
-                        }
+                    if is_retryable_error(&e) && attempt < RETRY_DELAYS_MS.len() {
+                        retry_delay(attempt, "Connection error").await;
+                        continue;
                     }
                     return Err(e.into());
                 }
@@ -265,142 +281,6 @@ fn extract_flags_from_help(help_text: &str) -> Vec<Vec<String>> {
     }
 
     all_flags
-}
-
-/// Extract positional arguments from help text using regex (local, no LLM needed)
-fn extract_positional_args_from_help(help_text: &str) -> Vec<PositionalArg> {
-    let mut positional_args: Vec<PositionalArg> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-
-    // Find usage lines - typically contain the command invocation pattern
-    // Look for lines starting with "Usage:", "usage:", or indented command patterns
-    let usage_section_pattern = Regex::new(r"(?mi)^(?:usage:?\s*\n?|^\s{0,4}[a-z][\w-]*\s+\[)").unwrap();
-
-    // Pattern to match required positional args: <arg>, <arg>...
-    let required_pattern = Regex::new(r"<([a-zA-Z][a-zA-Z0-9_-]*)>(?:\.\.\.)?").unwrap();
-
-    // Pattern to match optional positional args: [arg] (but not [--flag] or [-f])
-    let optional_pattern = Regex::new(r"\[([a-zA-Z][a-zA-Z0-9_-]*)\](?:\.\.\.)?").unwrap();
-
-    // Pattern to match UPPERCASE positional args like SOURCE, FILE, DIRECTORY
-    // Use word boundaries instead of look-around (not supported by rust regex)
-    let uppercase_pattern = Regex::new(r"\b([A-Z][A-Z0-9_]{1,})\b(?:\.\.\.)?").unwrap();
-
-    // Extract the usage section (first few lines after "Usage:" or the whole text if no usage section)
-    let usage_text = if let Some(m) = usage_section_pattern.find(help_text) {
-        // Get text from usage marker to next blank line or section
-        let start = m.start();
-        let remaining = &help_text[start..];
-        // Take lines until we hit a blank line or a new section (line starting with letter and colon)
-        let mut end_offset = 0;
-        for (i, line) in remaining.lines().enumerate() {
-            if i > 0 && (line.trim().is_empty() || (line.chars().next().map(|c| c.is_ascii_alphabetic()).unwrap_or(false) && line.contains(':'))) {
-                break;
-            }
-            // Stop after 10 lines to avoid going too far
-            if i > 10 {
-                break;
-            }
-            // Add this line's length plus newline
-            end_offset += line.len() + 1;
-        }
-        // Clamp to remaining length in case we counted past the end
-        &remaining[..end_offset.min(remaining.len())]
-    } else {
-        // No usage section found, use first 500 chars
-        &help_text[..help_text.len().min(500)]
-    };
-
-    // Helper to infer argument type from name
-    let infer_type = |name: &str| -> ArgumentType {
-        let lower = name.to_lowercase();
-        if lower.contains("file") || lower.contains("path") || lower.contains("dir")
-            || lower == "source" || lower == "target" || lower == "dest"
-            || lower == "destination" || lower == "src" || lower == "dst"
-            || lower.contains("mount") {
-            ArgumentType::Path
-        } else if lower.contains("num") || lower.contains("count") || lower == "n" {
-            ArgumentType::Int
-        } else {
-            ArgumentType::String
-        }
-    };
-
-    // Extract required positional args
-    for cap in required_pattern.captures_iter(usage_text) {
-        let name = cap.get(1).unwrap().as_str().to_string();
-        let lower_name = name.to_lowercase();
-
-        // Skip if it looks like a flag value placeholder (common patterns)
-        if lower_name == "value" || lower_name == "arg" || lower_name == "option"
-            || lower_name == "options" || lower_name == "args" {
-            continue;
-        }
-
-        if !seen.contains(&lower_name) {
-            seen.insert(lower_name.clone());
-            positional_args.push(PositionalArg {
-                name: name.clone(),
-                description: String::new(),
-                required: true,
-                sensitive: false,
-                argument_type: infer_type(&name),
-                default: None,
-            });
-        }
-    }
-
-    // Extract optional positional args
-    for cap in optional_pattern.captures_iter(usage_text) {
-        let name = cap.get(1).unwrap().as_str().to_string();
-        let lower_name = name.to_lowercase();
-
-        // Skip if it looks like a flag or common placeholder
-        if lower_name == "options" || lower_name == "option" || lower_name == "args"
-            || lower_name == "flags" || name.starts_with('-') {
-            continue;
-        }
-
-        if !seen.contains(&lower_name) {
-            seen.insert(lower_name.clone());
-            positional_args.push(PositionalArg {
-                name,
-                description: String::new(),
-                required: false,
-                sensitive: false,
-                argument_type: infer_type(&lower_name),
-                default: None,
-            });
-        }
-    }
-
-    // Extract UPPERCASE positional args (only if we haven't found angle-bracket versions)
-    if positional_args.is_empty() {
-        for cap in uppercase_pattern.captures_iter(usage_text) {
-            let name = cap.get(1).unwrap().as_str().to_string();
-            let lower_name = name.to_lowercase();
-
-            // Skip common non-positional uppercase words
-            if lower_name == "usage" || lower_name == "options" || lower_name == "synopsis"
-                || lower_name == "description" || lower_name == "see" || lower_name == "also" {
-                continue;
-            }
-
-            if !seen.contains(&lower_name) {
-                seen.insert(lower_name.clone());
-                positional_args.push(PositionalArg {
-                    name: lower_name.clone(),
-                    description: String::new(),
-                    required: true, // UPPERCASE args are typically required
-                    sensitive: false,
-                    argument_type: infer_type(&lower_name),
-                    default: None,
-                });
-            }
-        }
-    }
-
-    positional_args
 }
 
 #[derive(Serialize)]
@@ -566,7 +446,7 @@ JSON only, no other text."#,
                 &cached_context,
                 &query,
                 4096,
-                Some("claude-haiku-4-5-20251001"),
+                Some(HAIKU_MODEL),
             ).await?;
 
             let detailed: CommandOption = serde_json::from_str(&detail_json).map_err(|e| {
@@ -579,7 +459,7 @@ JSON only, no other text."#,
             io::stderr().flush().ok();
 
             // Small delay to ensure cache is ready
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(CACHE_WARMUP_DELAY_MS)).await;
         }
 
         // Helper to create option extraction future
@@ -591,7 +471,7 @@ JSON only, no other text."#,
                     &cached_context,
                     &query,
                     4096,
-                    Some("claude-haiku-4-5-20251001"),
+                    Some(HAIKU_MODEL),
                 ).await?;
 
                 let detailed: CommandOption = serde_json::from_str(&detail_json).map_err(|e| {
@@ -668,7 +548,7 @@ JSON only, no other text."#,
                         &cached_context,
                         &query,
                         1024,
-                        Some("claude-haiku-4-5-20251001"),
+                        Some(HAIKU_MODEL),
                     ).await?;
 
                     let detailed: PositionalArg = serde_json::from_str(&detail_json).map_err(|e| {
@@ -770,225 +650,5 @@ JSON only, no other text."#,
             .ok_or_else(|| QuocliError::Llm("Empty response from API".to_string()))?;
 
         Ok(text)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_extract_required_positional_args() {
-        let help_text = r#"
-Usage:
- mount [options] <source> <directory>
-
-Mount a filesystem.
-"#;
-        let args = extract_positional_args_from_help(help_text);
-
-        assert_eq!(args.len(), 2);
-        assert_eq!(args[0].name, "source");
-        assert!(args[0].required);
-        assert_eq!(args[0].argument_type, ArgumentType::Path);
-
-        assert_eq!(args[1].name, "directory");
-        assert!(args[1].required);
-        assert_eq!(args[1].argument_type, ArgumentType::Path);
-    }
-
-    #[test]
-    fn test_extract_optional_positional_args() {
-        let help_text = r#"
-Usage: mycommand [options] [file]
-
-Process a file.
-"#;
-        let args = extract_positional_args_from_help(help_text);
-
-        assert_eq!(args.len(), 1);
-        assert_eq!(args[0].name, "file");
-        assert!(!args[0].required);
-        assert_eq!(args[0].argument_type, ArgumentType::Path);
-    }
-
-    #[test]
-    fn test_extract_mixed_positional_args() {
-        let help_text = r#"
-Usage: cp [options] <source> [dest]
-
-Copy files.
-"#;
-        let args = extract_positional_args_from_help(help_text);
-
-        assert_eq!(args.len(), 2);
-        assert_eq!(args[0].name, "source");
-        assert!(args[0].required);
-
-        assert_eq!(args[1].name, "dest");
-        assert!(!args[1].required);
-        assert_eq!(args[1].argument_type, ArgumentType::Path);
-    }
-
-    #[test]
-    fn test_extract_uppercase_positional_args() {
-        let help_text = r#"
-Usage: tar [options] FILE...
-
-Archive files.
-"#;
-        let args = extract_positional_args_from_help(help_text);
-
-        assert_eq!(args.len(), 1);
-        assert_eq!(args[0].name, "file");
-        assert!(args[0].required);
-        assert_eq!(args[0].argument_type, ArgumentType::Path);
-    }
-
-    #[test]
-    fn test_infer_path_type_from_name() {
-        let help_text = r#"
-Usage: mycommand <file> <path> <directory> <src> <dst> <target>
-"#;
-        let args = extract_positional_args_from_help(help_text);
-
-        for arg in &args {
-            assert_eq!(arg.argument_type, ArgumentType::Path,
-                "Expected {} to be Path type", arg.name);
-        }
-    }
-
-    #[test]
-    fn test_infer_int_type_from_name() {
-        let help_text = r#"
-Usage: mycommand <count> <num>
-"#;
-        let args = extract_positional_args_from_help(help_text);
-
-        assert_eq!(args.len(), 2);
-        assert_eq!(args[0].argument_type, ArgumentType::Int);
-        assert_eq!(args[1].argument_type, ArgumentType::Int);
-    }
-
-    #[test]
-    fn test_infer_string_type_default() {
-        let help_text = r#"
-Usage: mycommand <name> <pattern>
-"#;
-        let args = extract_positional_args_from_help(help_text);
-
-        assert_eq!(args.len(), 2);
-        assert_eq!(args[0].argument_type, ArgumentType::String);
-        assert_eq!(args[1].argument_type, ArgumentType::String);
-    }
-
-    #[test]
-    fn test_skip_placeholder_args() {
-        let help_text = r#"
-Usage: mycommand <value> <arg> <options> <file>
-"#;
-        let args = extract_positional_args_from_help(help_text);
-
-        // Should only extract <file>, skipping <value>, <arg>, <options>
-        assert_eq!(args.len(), 1);
-        assert_eq!(args[0].name, "file");
-    }
-
-    #[test]
-    fn test_no_positional_args() {
-        let help_text = r#"
-Usage: mycommand [options]
-
-Options:
-  -v, --verbose    Be verbose
-  -h, --help       Show help
-"#;
-        let args = extract_positional_args_from_help(help_text);
-
-        assert_eq!(args.len(), 0);
-    }
-
-    #[test]
-    fn test_deduplicates_args() {
-        let help_text = r#"
-Usage:
- mount [options] <source> <directory>
- mount [options] <source>
-"#;
-        let args = extract_positional_args_from_help(help_text);
-
-        // Should deduplicate 'source'
-        assert_eq!(args.len(), 2);
-        let names: Vec<_> = args.iter().map(|a| a.name.as_str()).collect();
-        assert!(names.contains(&"source"));
-        assert!(names.contains(&"directory"));
-    }
-
-    #[test]
-    fn test_mount_command_usage() {
-        // Real mount command usage pattern
-        let help_text = r#"
-Usage:
- mount [-lhV]
- mount -a [options]
- mount [options] [--source] <source> | [--target] <directory>
- mount [options] <source> <directory>
- mount <operation> <mountpoint> [<target>]
-
-Mount a filesystem.
-
-Options:
- -a, --all               mount all filesystems
-"#;
-        let args = extract_positional_args_from_help(help_text);
-
-        // Should extract source, directory, operation, mountpoint, target
-        assert!(args.len() >= 2, "Expected at least 2 args, got {}", args.len());
-
-        let names: Vec<_> = args.iter().map(|a| a.name.as_str()).collect();
-        assert!(names.contains(&"source"), "Missing 'source' arg");
-        assert!(names.contains(&"directory"), "Missing 'directory' arg");
-    }
-
-    #[test]
-    fn test_variadic_args() {
-        let help_text = r#"
-Usage: cat [options] <file>...
-"#;
-        let args = extract_positional_args_from_help(help_text);
-
-        assert_eq!(args.len(), 1);
-        assert_eq!(args[0].name, "file");
-        assert!(args[0].required);
-    }
-
-    #[test]
-    fn test_usage_section_extraction() {
-        // Test that we stop at the Options section
-        let help_text = r#"
-Usage: mycommand <file>
-
-Options:
-  -v, --verbose    Be verbose
-
-Description:
-  This is a <placeholder> that should not be extracted.
-"#;
-        let args = extract_positional_args_from_help(help_text);
-
-        assert_eq!(args.len(), 1);
-        assert_eq!(args[0].name, "file");
-    }
-
-    #[test]
-    fn test_prefers_angle_brackets_over_uppercase() {
-        let help_text = r#"
-Usage: mycommand <file> FILE
-"#;
-        let args = extract_positional_args_from_help(help_text);
-
-        // Should extract <file> but not FILE since we found angle-bracket style
-        assert_eq!(args.len(), 1);
-        assert_eq!(args[0].name, "file");
     }
 }

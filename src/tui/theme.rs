@@ -33,7 +33,6 @@ impl Theme {
         }
     }
 
-    #[allow(dead_code)]
     pub fn light() -> Self {
         Self {
             normal: Style::default().fg(Color::Black),
